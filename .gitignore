@@ -1,0 +1,19 @@
+# Local data and credentials – do not commit
+x_credentials.json
+my_tweets.json
+deleted_history.json
+*.tmp
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
