@@ -1,10 +1,19 @@
 # Local data and credentials – do not commit
 x_credentials.json
+*credentials*.json
+credentials.json
+.env
+.env.local
+.env.*.local
 my_tweets.json
 deleted_history.json
 *.tmp
+*.tmp.json
+ai_requests.log
 
 # Python
+.venv/
+venv/
 __pycache__/
 *.py[cod]
 *.pyo
