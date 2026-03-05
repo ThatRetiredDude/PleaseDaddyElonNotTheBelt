@@ -15,11 +15,13 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 import urllib.error
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # AI request debug logger (writes to ai_requests.log, never logs tokens)
 _ai_logger = logging.getLogger("PleaseDaddyElonNotTheBelt.ai")
 _ai_logger.setLevel(logging.DEBUG)
 if not _ai_logger.handlers:
-    _fh = logging.FileHandler("ai_requests.log", encoding="utf-8")
+    _fh = logging.FileHandler(os.path.join(BASE_DIR, "ai_requests.log"), encoding="utf-8")
     _fh.setLevel(logging.DEBUG)
     _fh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
     _ai_logger.addHandler(_fh)
@@ -108,9 +110,9 @@ check_dependencies()
 
 import tweepy
 
-CREDENTIALS_FILE = "x_credentials.json"
-TWEETS_FILE = "my_tweets.json"
-HISTORY_FILE = "deleted_history.json"
+CREDENTIALS_FILE = os.path.join(BASE_DIR, "x_credentials.json")
+TWEETS_FILE = os.path.join(BASE_DIR, "my_tweets.json")
+HISTORY_FILE = os.path.join(BASE_DIR, "deleted_history.json")
 CHUNK_SIZE = 80
 AI_ENDPOINT_DEFAULT = "https://api.x.ai/v1"
 AI_REQUEST_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -421,6 +423,7 @@ class XBulkDeleter:
         self.refresh_tweets_list()
         self.update_delete_preview()
         self.refresh_history_tab()
+        self._refresh_ai_scrub_coverage_preview()
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.mainloop()
@@ -807,17 +810,38 @@ Then go to Tab 3 – My Posts & Replies."""
         source_frame = ttk.Frame(parent)
         source_frame.pack(fill="x", padx=30, pady=5)
         self.ai_scrub_source_var = tk.StringVar(value="selected")
-        ttk.Radiobutton(source_frame, text="Send selected (in queue)", variable=self.ai_scrub_source_var, value="selected").pack(side="left", padx=(0, 20))
-        ttk.Radiobutton(source_frame, text="Send all (in batches)", variable=self.ai_scrub_source_var, value="all").pack(side="left", padx=(0, 10))
+        ttk.Radiobutton(source_frame, text="Selected queue items", variable=self.ai_scrub_source_var, value="selected").pack(side="left", padx=(0, 20))
+        ttk.Radiobutton(source_frame, text="All loaded tweets", variable=self.ai_scrub_source_var, value="all").pack(side="left", padx=(0, 10))
+        ttk.Radiobutton(source_frame, text="Reload saved cache and scrub all", variable=self.ai_scrub_source_var, value="cache").pack(side="left", padx=(0, 10))
         self.ai_scrub_warning_label = ttk.Label(source_frame, text="", style="Muted.TLabel")
         self.ai_scrub_warning_label.pack(side="left", padx=8)
 
         def on_source_change(*args):
-            if self.ai_scrub_source_var.get() == "all":
-                self.ai_scrub_warning_label.config(text="Sends a sample of your tweets to the AI; multiple requests possible.")
-            else:
+            source = self.ai_scrub_source_var.get()
+            if source == "selected":
                 self.ai_scrub_warning_label.config(text="")
+            elif source == "all":
+                self.ai_scrub_warning_label.config(text="Scans all tweets currently loaded in this session.")
+            else:
+                self.ai_scrub_warning_label.config(text="Reloads my_tweets.json, merges with loaded tweets, then scans all in batches.")
+            self._refresh_ai_scrub_coverage_preview()
         self.ai_scrub_source_var.trace_add("write", on_source_change)
+        on_source_change()
+
+        coverage_frame = ttk.LabelFrame(parent, text=" Coverage ", padding=8)
+        coverage_frame.pack(fill="x", padx=30, pady=(6, 6))
+        self.ai_scrub_loaded_count_var = tk.StringVar(value="Loaded in memory: 0")
+        self.ai_scrub_cache_count_var = tk.StringVar(value="Saved cache rows: 0")
+        self.ai_scrub_send_count_var = tk.StringVar(value="Rows being sent: 0")
+        self.ai_scrub_batch_count_var = tk.StringVar(value="Estimated batches: 0")
+        ttk.Label(coverage_frame, textvariable=self.ai_scrub_loaded_count_var, style="Muted.TLabel").pack(anchor="w")
+        ttk.Label(coverage_frame, textvariable=self.ai_scrub_cache_count_var, style="Muted.TLabel").pack(anchor="w")
+        ttk.Label(coverage_frame, textvariable=self.ai_scrub_send_count_var, style="Muted.TLabel").pack(anchor="w")
+        ttk.Label(coverage_frame, textvariable=self.ai_scrub_batch_count_var, style="Muted.TLabel").pack(anchor="w")
+        coverage_btns = ttk.Frame(coverage_frame)
+        coverage_btns.pack(anchor="w", pady=(6, 0))
+        ttk.Button(coverage_btns, text="Refresh counts", command=self._refresh_ai_scrub_coverage_preview).pack(side="left", padx=(0, 8))
+        ttk.Button(coverage_btns, text="Import archive", command=self.import_archive_tweets).pack(side="left")
 
         ttk.Label(parent, text="What do you want to find or remove? (e.g. complaints, old jokes, politics)").pack(anchor="w", padx=30, pady=(10, 2))
         self.ai_scrub_prompt_text = tk.Text(parent, height=4, wrap="word", font=("Arial", 10))
@@ -827,6 +851,8 @@ Then go to Tab 3 – My Posts & Replies."""
         btn_run_frame = ttk.Frame(parent)
         btn_run_frame.pack(fill="x", padx=30, pady=10)
         ttk.Button(btn_run_frame, text="Run AI Scrub", command=self._start_ai_scrub).pack(side="left", padx=(0, 8))
+        self.ai_scrub_cancel_btn = ttk.Button(btn_run_frame, text="Cancel", command=self._cancel_ai_scrub, state="disabled")
+        self.ai_scrub_cancel_btn.pack(side="left", padx=(0, 8))
         self.ai_scrub_progress_var = tk.StringVar(value="Idle.")
         ttk.Label(btn_run_frame, textvariable=self.ai_scrub_progress_var, style="Status.TLabel").pack(side="left", padx=8)
 
@@ -847,6 +873,70 @@ Then go to Tab 3 – My Posts & Replies."""
         self.ai_scrub_last_use_regex = False
         self._ai_scrub_running = False
 
+    def _read_saved_tweets(self):
+        if not os.path.exists(TWEETS_FILE):
+            return []
+        try:
+            with open(TWEETS_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, list) else []
+        except (json.JSONDecodeError, OSError):
+            return []
+
+    def _merge_tweet_sets(self, in_memory, from_cache):
+        by_id = {}
+        for t in from_cache + in_memory:
+            tweet_id = str(t.get("id", "")).strip()
+            if not tweet_id:
+                continue
+            existing = by_id.get(tweet_id)
+            if existing is None:
+                by_id[tweet_id] = dict(t)
+            else:
+                merged = dict(existing)
+                merged.update(t)
+                merged["id"] = tweet_id
+                merged["selected"] = bool(existing.get("selected") or t.get("selected"))
+                by_id[tweet_id] = merged
+        merged = list(by_id.values())
+        merged.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        return merged
+
+    def _get_ai_scrub_source_tweets(self, source, apply_merge=False):
+        if source == "selected":
+            return [t for t in self.tweets if t.get("selected")]
+        if source == "all":
+            return list(self.tweets)
+        cached = self._read_saved_tweets()
+        merged = self._merge_tweet_sets(list(self.tweets), cached)
+        if apply_merge and merged:
+            self.tweets = merged
+            self.save_tweets()
+            self.refresh_tweets_list()
+            self.update_delete_preview()
+        return merged
+
+    def _refresh_ai_scrub_coverage_preview(self):
+        if not hasattr(self, "ai_scrub_loaded_count_var"):
+            return
+        source = self.ai_scrub_source_var.get() if hasattr(self, "ai_scrub_source_var") else "selected"
+        model = (self.ai_model_var.get() or "").strip() if hasattr(self, "ai_model_var") else ""
+        model = model or (AI_MODELS[0] if AI_MODELS else "")
+        loaded = len(self.tweets)
+        cached = len(self._read_saved_tweets())
+        source_tweets = self._get_ai_scrub_source_tweets(source, apply_merge=False)
+        send_rows = len(source_tweets)
+        est_batches = len(list(build_ai_batches(source_tweets, model))) if send_rows else 0
+        self.ai_scrub_loaded_count_var.set(f"Loaded in memory: {loaded}")
+        self.ai_scrub_cache_count_var.set(f"Saved cache rows: {cached}")
+        self.ai_scrub_send_count_var.set(f"Rows being sent: {send_rows}")
+        self.ai_scrub_batch_count_var.set(f"Estimated batches: {est_batches}")
+
+    def _cancel_ai_scrub(self):
+        self._ai_scrub_running = False
+        self.ai_scrub_progress_var.set("Cancelling after current batch...")
+        self.ai_scrub_cancel_btn.config(state="disabled")
+
     def _start_ai_scrub(self):
         prompt = (self.ai_scrub_prompt_text.get("1.0", tk.END) or "").strip()
         if not prompt:
@@ -857,32 +947,36 @@ Then go to Tab 3 – My Posts & Replies."""
             messagebox.showerror("AI Scrub", "Set an API token in Tab 2 (Authorization) and save.")
             return
         source = self.ai_scrub_source_var.get() or "selected"
-        if source == "selected":
-            tweets = [t for t in self.tweets if t.get("selected")]
-            if not tweets:
-                messagebox.showinfo("AI Scrub", "Add tweets to the queue first (Posts & Replies) or choose Send all.")
-                return
-        else:
-            tweets = list(self.tweets)
-            if not tweets:
-                messagebox.showinfo("AI Scrub", "No tweets loaded. Fetch or import tweets first.")
-                return
+        tweets = self._get_ai_scrub_source_tweets(source, apply_merge=(source == "cache"))
+        if source == "selected" and not tweets:
+            messagebox.showinfo("AI Scrub", "Add tweets to the queue first (Posts & Replies), or choose an all-tweets mode.")
+            return
+        if not tweets:
+            messagebox.showinfo("AI Scrub", "No tweets loaded. Fetch/import tweets first, then run AI Scrub.")
+            return
+        if source in ("all", "cache") and len(tweets) < 500:
+            self.ai_scrub_progress_var.set(
+                "AI Scrub scans loaded tweets. For full account history, fetch older until exhausted or import archive."
+            )
         model = (self.ai_model_var.get() or "").strip() or (AI_MODELS[0] if AI_MODELS else "")
         endpoint = (self.ai_endpoint_var.get() or "").strip().rstrip("/") or AI_ENDPOINT_DEFAULT
         self._ai_scrub_running = True
         self.ai_scrub_apply_btn.config(state="disabled")
         self.ai_scrub_add_queue_btn.config(state="disabled")
+        self.ai_scrub_cancel_btn.config(state="normal")
         self.ai_scrub_progress_var.set("Building batches…")
+        self._refresh_ai_scrub_coverage_preview()
 
         def run():
             try:
                 batches = list(build_ai_batches(tweets, model))
                 total = len(batches)
                 responses = []
+                processed_rows = 0
                 for i, batch in enumerate(batches):
                     if not self._ai_scrub_running:
                         break
-                    msg = f"Batch {i + 1} of {total}"
+                    msg = f"Batch {i + 1} of {total} | processed {processed_rows}/{len(tweets)} rows"
                     self.root.after(0, lambda m=msg: self.ai_scrub_progress_var.set(m))
                     batch_text = "\n---\n".join((t.get("text") or "") for t in batch)
                     user_prompt = f"Goal: {prompt}\n\nTweets in this batch:\n{batch_text}"
@@ -890,6 +984,7 @@ Then go to Tab 3 – My Posts & Replies."""
                         q = self._call_ai_reviewer(endpoint, model, token, user_prompt)
                         if q:
                             responses.append(q)
+                        processed_rows += len(batch)
                     except Exception as e:
                         self.root.after(0, lambda err=self._sanitize_for_display(str(e)): messagebox.showerror("AI Scrub batch error", err))
                         break
@@ -902,6 +997,7 @@ Then go to Tab 3 – My Posts & Replies."""
                 self.root.after(0, lambda: self._ai_scrub_clear_results_on_error())
             finally:
                 self._ai_scrub_running = False
+                self.root.after(0, lambda: self.ai_scrub_cancel_btn.config(state="disabled"))
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -930,6 +1026,7 @@ Then go to Tab 3 – My Posts & Replies."""
             self.ai_scrub_progress_var.set(f"Done. Matched {matched} tweets.")
         self.ai_scrub_apply_btn.config(state="normal")
         self.ai_scrub_add_queue_btn.config(state="normal")
+        self.ai_scrub_cancel_btn.config(state="disabled")
 
     def _ai_scrub_apply_search(self):
         if self.ai_scrub_last_compiled:
@@ -1376,6 +1473,7 @@ Then go to Tab 3 – My Posts & Replies."""
                 self.save_tweets()
                 self.refresh_tweets_list()
                 self.update_delete_preview()
+                self._refresh_ai_scrub_coverage_preview()
 
             messagebox.showinfo(
                 "Import Complete",
@@ -1478,6 +1576,7 @@ Then go to Tab 3 – My Posts & Replies."""
             self.save_tweets()
             self.refresh_tweets_list()
             self.update_delete_preview()
+            self._refresh_ai_scrub_coverage_preview()
             messagebox.showinfo("Done", f"Added {added} {direction} tweet(s). Total now: {len(self.tweets)}")
         except Exception as e:
             details = self._build_error_details(e)
