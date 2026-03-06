@@ -46,9 +46,10 @@ python PleaseDaddyElonNotTheBelt.py
 1. **Tab 1 – Instructions**: Step-by-step guide to get your X API keys.
 2. **Tab 2 – Authorization**: Enter your API credentials, click **Save Credentials**, then **Test User Auth (RW)**. Optionally set **AI Reviewer** (endpoint default: xAI, model dropdown, API token) and save; token is stored in the same local credentials file and is masked in the UI.
 3. **Tab 3 – My Posts & Replies**: **Robot icon** opens the AI Reviewer: type what you’re looking for (e.g. “tweets about the weather”), click **Send**; the AI returns a search suggestion and the app applies it to filter the list. Use **Fetch Newer** / **Fetch Older**, **Import Archive**, and Search/Filters to queue items for deletion.
-4. **Tab 4 – Deletion Queue**: Review selected tweets, then **DELETE ALL QUEUED NOW** (with confirmation). Unqueue or delete in bulk; batches run in a bottom panel with Pause/Stop.
-5. **Tab 5 – Historical Deletions**: View tally and past deletions. Per row: **Trash** (remove from history), **Arrow** (open X intent with pre-filled text), **Envelope** (copy into Compose tab).
-6. **Tab 6 – Compose**: Write a tweet (280 chars), **Post** via API or **Clear**. Use **Envelope** on a history row to pre-fill.
+4. **Tab 4 – AI Scrub**: Batch-send loaded/imported tweets to an AI model and get one compiled search. **Apply search to Posts tab** filters Tab 3; **Queue all matched tweets** selects everything matched into Tab 5.
+5. **Tab 5 – Deletion Queue**: Review selected tweets, then **DELETE ALL QUEUED NOW** (with confirmation). Unqueue or delete in bulk; batches run in a bottom panel with Pause/Stop.
+6. **Tab 6 – Historical Deletions**: View tally and past deletions. Per row: **Trash** (remove from history), **Arrow** (open X intent with pre-filled text), **Envelope** (copy into Compose tab).
+7. **Tab 7 – Compose**: Write a tweet (280 chars), **Post** via API or **Clear**. Use **Envelope** on a history row to pre-fill.
 
 ### Fetch vs Delete auth behavior
 

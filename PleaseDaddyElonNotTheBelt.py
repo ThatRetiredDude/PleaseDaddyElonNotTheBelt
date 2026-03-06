@@ -521,22 +521,22 @@ class XBulkDeleter:
         self.notebook.add(view_tab, text="3. My Posts & Replies")
         self.setup_view_tab(view_tab)
 
+        ai_scrub_tab = ttk.Frame(self.notebook)
+        self.notebook.add(ai_scrub_tab, text="4. AI Scrub")
+        self.ai_scrub_tab_index = 3
+        self.setup_ai_scrub_tab(ai_scrub_tab)
+
         del_tab = ttk.Frame(self.notebook)
-        self.notebook.add(del_tab, text="4. Deletion Queue")
+        self.notebook.add(del_tab, text="5. Deletion Queue")
         self.setup_delete_tab(del_tab)
 
         history_tab = ttk.Frame(self.notebook)
-        self.notebook.add(history_tab, text="5. Historical Deletions")
+        self.notebook.add(history_tab, text="6. Historical Deletions")
         self.setup_history_tab(history_tab)
 
         compose_tab = ttk.Frame(self.notebook)
-        self.notebook.add(compose_tab, text="6. Compose")
+        self.notebook.add(compose_tab, text="7. Compose")
         self.setup_compose_tab(compose_tab)
-
-        ai_scrub_tab = ttk.Frame(self.notebook)
-        self.notebook.add(ai_scrub_tab, text="7. AI Scrub")
-        self.ai_scrub_tab_index = 6
-        self.setup_ai_scrub_tab(ai_scrub_tab)
 
     def setup_instructions_tab(self, parent):
         ttk.Label(parent, text="How to Get Your Keys (Step-by-Step)", font=("Arial", 14, "bold"), style="Title.TLabel").pack(pady=(20,10))
@@ -804,9 +804,17 @@ Then go to Tab 3 – My Posts & Replies."""
 
     def setup_ai_scrub_tab(self, parent):
         ttk.Label(parent, text="AI Scrub", font=("Arial", 14, "bold"), style="Title.TLabel").pack(pady=(20, 10))
-        ttk.Label(parent, text="Send tweets to the AI in batches; get one combined search. Uses model/endpoint/token from Tab 2 (Authorization).",
-                  style="Muted.TLabel", wraplength=700).pack(anchor="w", padx=30, pady=(0, 10))
+        ttk.Label(
+            parent,
+            text=(
+                "Runs in batches and produces one combined search.\n"
+                "Uses model/endpoint/token from Tab 2 (Authorization). AI Scrub can only scan tweets you have fetched/imported into this app."
+            ),
+            style="Muted.TLabel",
+            wraplength=750
+        ).pack(anchor="w", padx=30, pady=(0, 10))
 
+        ttk.Label(parent, text="1. Choose which tweets to scan", font=("Arial", 11, "bold"), style="Title.TLabel").pack(anchor="w", padx=30, pady=(6, 0))
         source_frame = ttk.Frame(parent)
         source_frame.pack(fill="x", padx=30, pady=5)
         self.ai_scrub_source_var = tk.StringVar(value="selected")
@@ -841,13 +849,15 @@ Then go to Tab 3 – My Posts & Replies."""
         coverage_btns = ttk.Frame(coverage_frame)
         coverage_btns.pack(anchor="w", pady=(6, 0))
         ttk.Button(coverage_btns, text="Refresh counts", command=self._refresh_ai_scrub_coverage_preview).pack(side="left", padx=(0, 8))
-        ttk.Button(coverage_btns, text="Import archive", command=self.import_archive_tweets).pack(side="left")
+        ttk.Label(coverage_btns, text="Import Archive lives in Tab 3.", style="Muted.TLabel").pack(side="left")
 
-        ttk.Label(parent, text="What do you want to find or remove? (e.g. complaints, old jokes, politics)").pack(anchor="w", padx=30, pady=(10, 2))
+        ttk.Label(parent, text="2. Describe what you want to find", font=("Arial", 11, "bold"), style="Title.TLabel").pack(anchor="w", padx=30, pady=(10, 0))
+        ttk.Label(parent, text="Example: complaints, old jokes, politics", style="Muted.TLabel").pack(anchor="w", padx=30, pady=(0, 2))
         self.ai_scrub_prompt_text = tk.Text(parent, height=4, wrap="word", font=("Arial", 10))
         self._style_text_widget(self.ai_scrub_prompt_text)
         self.ai_scrub_prompt_text.pack(fill="x", padx=30, pady=5)
 
+        ttk.Label(parent, text="3. Run AI Scrub", font=("Arial", 11, "bold"), style="Title.TLabel").pack(anchor="w", padx=30, pady=(8, 0))
         btn_run_frame = ttk.Frame(parent)
         btn_run_frame.pack(fill="x", padx=30, pady=10)
         ttk.Button(btn_run_frame, text="Run AI Scrub", command=self._start_ai_scrub).pack(side="left", padx=(0, 8))
@@ -865,9 +875,9 @@ Then go to Tab 3 – My Posts & Replies."""
         ttk.Label(results_frame, textvariable=self.ai_scrub_result_var, style="Muted.TLabel").pack(anchor="w", pady=(0, 8))
         action_frame = ttk.Frame(results_frame)
         action_frame.pack(fill="x")
-        self.ai_scrub_apply_btn = ttk.Button(action_frame, text="Apply search", command=self._ai_scrub_apply_search, state="disabled")
+        self.ai_scrub_apply_btn = ttk.Button(action_frame, text="Apply search to Posts tab", command=self._ai_scrub_apply_search, state="disabled")
         self.ai_scrub_apply_btn.pack(side="left", padx=(0, 8))
-        self.ai_scrub_add_queue_btn = ttk.Button(action_frame, text="Add all matches to queue", command=self._ai_scrub_add_all_to_queue, state="disabled")
+        self.ai_scrub_add_queue_btn = ttk.Button(action_frame, text="Queue all matched tweets", command=self._ai_scrub_add_all_to_queue, state="disabled")
         self.ai_scrub_add_queue_btn.pack(side="left", padx=8)
         self.ai_scrub_last_compiled = ""
         self.ai_scrub_last_use_regex = False
@@ -1043,7 +1053,7 @@ Then go to Tab 3 – My Posts & Replies."""
         self.refresh_tweets_list()
         self.update_delete_preview()
         count = len(self._get_display_tweets())
-        self.notebook.select(3)
+        self.notebook.select(4)
         messagebox.showinfo("AI Scrub", f"Added {count} match(es) to the deletion queue.")
 
     # ====================== CREDENTIALS ======================
@@ -2356,7 +2366,7 @@ Then go to Tab 3 – My Posts & Replies."""
         self.compose_text.delete("1.0", tk.END)
         self.compose_text.insert("1.0", (entry.get("text") or "")[:280])
         self._on_compose_key(None)
-        self.notebook.select(5)
+        self.notebook.select(6)
 
     def refresh_history_tab(self):
         total = len(self.deleted_history)
