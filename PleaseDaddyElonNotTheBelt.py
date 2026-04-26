@@ -54,6 +54,10 @@ def check_dependencies():
         import tkinter
     except ImportError:
         missing.append("tkinter")
+    try:
+        import matplotlib
+    except ImportError:
+        missing.append("matplotlib")
 
     if not missing:
         return  # everything is installed
@@ -109,6 +113,11 @@ check_dependencies()
 # ────────────────────────────────────────────────
 
 import tweepy
+import xeraser_analytics
+
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+import matplotlib.pyplot as plt
 
 CREDENTIALS_FILE = os.path.join(BASE_DIR, "x_credentials.json")
 TWEETS_FILE = os.path.join(BASE_DIR, "my_tweets.json")
@@ -256,7 +265,7 @@ AI_MODEL_DEFAULT_ENDPOINT = {
     "codellama-70b-instruct": "https://api.together.xyz/v1",
     "command-r-plus": "https://api.cohere.ai/v1",
 }
-# Max context window (tokens) per model for AI Scrub batching; unknown models use AI_CONTEXT_FALLBACK_TOKENS
+# Max context (tokens) per model for ToS review batching; unknown models use AI_CONTEXT_FALLBACK_TOKENS
 AI_MODEL_CONTEXT_TOKENS = {
     "gemini-3.1-pro-preview": 1_000_000,
     "gemini-3.1-flash-lite-preview": 1_000_000,
@@ -398,6 +407,8 @@ class XBulkDeleter:
         self.to_date_var = tk.StringVar()
         self.type_filter_var = tk.StringVar(value="all")
         self.date_sort_var = tk.StringVar(value="newest")
+        self.show_source_var = tk.StringVar(value="All")
+        self.x_username_var = tk.StringVar(value="")
         self._tweet_wheel_bound = False
         self.batch_counter = 0
         self.active_batch = None
@@ -414,6 +425,27 @@ class XBulkDeleter:
         self._history_wheel_bound = False
         self._tooltip_after_id = None
         self._tooltip_win = None
+        self._tos_flagged_ids = set()
+
+        self.me_id = None
+        self.following_list = []
+        self.follower_list = []
+        self.follows_status = tk.StringVar(value="Not loaded. Click Refresh.")
+        self._follows_scroll = {}
+        self.blocked_list = []
+        self.muted_list = []
+        self.blocks_status = tk.StringVar(value="Not loaded.")
+        self.analytics_tweets_path = tk.StringVar()
+        self.analytics_overview_path = tk.StringVar()
+        self.analytics_content_path = tk.StringVar()
+        self.analytics_status = tk.StringVar(
+            value="Data stays on this computer — pick files and Load dashboard."
+        )
+        self.parsed_tweets = []
+        self.parsed_overview = []
+        self.parsed_content = []
+        self._analytics_chart_parent = None
+        self._analytics_figures = []
 
         self.setup_theme()
         self.create_tabs()
@@ -522,7 +554,7 @@ class XBulkDeleter:
         self.setup_view_tab(view_tab)
 
         ai_scrub_tab = ttk.Frame(self.notebook)
-        self.notebook.add(ai_scrub_tab, text="4. AI Scrub")
+        self.notebook.add(ai_scrub_tab, text="4. ToS review")
         self.ai_scrub_tab_index = 3
         self.setup_ai_scrub_tab(ai_scrub_tab)
 
@@ -538,11 +570,23 @@ class XBulkDeleter:
         self.notebook.add(compose_tab, text="7. Compose")
         self.setup_compose_tab(compose_tab)
 
+        follows_tab = ttk.Frame(self.notebook)
+        self.notebook.add(follows_tab, text="8. Follows")
+        self.setup_follows_tab(follows_tab)
+
+        blocks_tab = ttk.Frame(self.notebook)
+        self.notebook.add(blocks_tab, text="9. Blocks & Mutes")
+        self.setup_blocks_mutes_tab(blocks_tab)
+
+        analytics_tab = ttk.Frame(self.notebook)
+        self.notebook.add(analytics_tab, text="10. Analytics (offline)")
+        self.setup_analytics_tab(analytics_tab)
+
     def setup_instructions_tab(self, parent):
         ttk.Label(parent, text="How to Get Your Keys (Step-by-Step)", font=("Arial", 14, "bold"), style="Title.TLabel").pack(pady=(20,10))
         instr_frame = ttk.LabelFrame(parent, text=" Setup ", padding=15)
         instr_frame.pack(fill="both", expand=True, padx=30, pady=15)
-        instr_text = tk.Text(instr_frame, height=20, width=85, wrap="word", font=("Arial", 10))
+        instr_text = tk.Text(instr_frame, height=28, width=85, wrap="word", font=("Arial", 10))
         self._style_text_widget(instr_text)
         instr_text.pack(fill="both", expand=True)
         instructions = """1. Go to https://developer.x.com/en/portal/dashboard
@@ -559,9 +603,20 @@ class XBulkDeleter:
    Free tier can only delete (cannot fetch history)
 
 After saving credentials (Tab 2 – Authorization):
-• "Test User Auth (RW)" validates Consumer/Access tokens
-• "Test Bearer (RO)" validates Bearer token for read-only endpoints
-Then go to Tab 3 – My Posts & Replies."""
+• "Test User Auth (RW)" validates Consumer/Access tokens and fetches your X username (shown as "X account: @username"). Use for Follows, Blocks, and fetching posts in Tab 3.
+• "Test Bearer (RO)" validates Bearer token for read-only endpoints.
+
+Tab overview:
+• Tab 1 – Instructions (this tab)
+• Tab 2 – Authorization: X API keys, X account, optional AI (model, endpoint, token) for ToS review (Tab 4) only. Posts are loaded with the X API, not the AI.
+• Tab 3 – My Posts & Replies: Fetch Newer / Older and Import Archive; search, filters, and Advanced
+• Tab 4 – ToS review: flag posts that may violate X Terms; apply filter or queue
+• Tab 5 – Deletion Queue: review and delete queued tweets; batch panel with Pause/Stop
+• Tab 6 – Historical Deletions: Trash / Arrow (X intent) / Envelope (Compose tab)
+• Tab 7 – Compose: write and post tweets
+• Tab 8 – Follows: following/followers, mutual views, follow/unfollow
+• Tab 9 – Blocks & Mutes
+• Tab 10 – Analytics (offline): tweets.js and Premium CSVs, local only"""
         instr_text.insert("1.0", instructions)
         instr_text.config(state="disabled")
 
@@ -586,17 +641,24 @@ Then go to Tab 3 – My Posts & Replies."""
             entry = ttk.Entry(cred_frame, textvariable=self.cred_vars[i], width=55, show="*" if i in (1, 3) else None)
             entry.grid(row=i, column=1, pady=6, padx=10, sticky="ew")
 
+        ttk.Label(cred_frame, text="X account:", width=25, anchor="e").grid(row=5, column=0, pady=6, sticky="e")
+        self.x_account_display_label = ttk.Label(cred_frame, text="(run Test User Auth to set)", style="Muted.TLabel")
+        self.x_account_display_label.grid(row=5, column=1, pady=6, padx=10, sticky="w")
+
         btn_frame = ttk.Frame(parent)
         btn_frame.pack(pady=10)
         ttk.Button(btn_frame, text="💾 Save Credentials", command=self.save_credentials).pack(side="left", padx=8)
         ttk.Button(btn_frame, text="🔑 Test User Auth (RW)", command=self.test_auth).pack(side="left", padx=8)
         ttk.Button(btn_frame, text="🧪 Test Bearer (RO)", command=self.test_bearer_auth).pack(side="left", padx=8)
 
-        # AI Reviewer section (model first, then endpoint so selection can auto-fill endpoint)
-        ai_frame = ttk.LabelFrame(parent, text=" AI Reviewer (optional) ", padding=15)
+        # Optional AI: ToS review only (Tab 4). Fetching posts always uses the X API (Tab 3).
+        ai_frame = ttk.LabelFrame(parent, text=" AI – ToS review (optional) ", padding=15)
         ai_frame.pack(fill="x", padx=30, pady=15)
-        ttk.Label(ai_frame, text="Use the robot icon in Posts & Replies to ask AI to help filter tweets. Token is stored locally and never logged. Model and endpoint are typeable; pick from the list or enter a custom model/endpoint.",
-                 style="Muted.TLabel", wraplength=600).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ttk.Label(
+            ai_frame,
+            text="Model, endpoint, and API token for Tab 4 (Terms of Service review) only. Not used to download posts. Token is stored locally and never logged; pick a model and endpoint or use custom values.",
+            style="Muted.TLabel", wraplength=600,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
         ttk.Label(ai_frame, text="Model:", width=18, anchor="e").grid(row=1, column=0, pady=4, sticky="e")
         self.ai_model_var = tk.StringVar(value=AI_MODELS[0] if AI_MODELS else "")
         default_endpoint = AI_MODEL_DEFAULT_ENDPOINT.get(AI_MODELS[0], AI_ENDPOINT_DEFAULT) if AI_MODELS else AI_ENDPOINT_DEFAULT
@@ -611,6 +673,14 @@ Then go to Tab 3 – My Posts & Replies."""
         ai_token_entry = ttk.Entry(ai_frame, textvariable=self.ai_token_var, width=50, show="*")
         ai_token_entry.grid(row=3, column=1, pady=4, padx=8, sticky="ew")
         ai_frame.columnconfigure(1, weight=1)
+        self._update_x_account_display()
+
+    def _update_x_account_display(self):
+        """Refresh the X account label on the auth tab from x_username_var."""
+        if getattr(self, "x_account_display_label", None) is None:
+            return
+        u = (self.x_username_var.get() or "").strip()
+        self.x_account_display_label.config(text="@" + u if u else "(run Test User Auth to set)")
 
     def _on_ai_model_selected(self, event=None):
         """When user picks a model from the list, auto-fill the endpoint only if it's empty or still a known default (so custom endpoints are not overwritten)."""
@@ -627,7 +697,6 @@ Then go to Tab 3 – My Posts & Replies."""
         ctrl_frame = ttk.Frame(parent)
         ctrl_frame.pack(fill="x", pady=(8, 4))
 
-        ttk.Button(ctrl_frame, text="🤖", width=3, command=lambda: self.notebook.select(self.ai_scrub_tab_index)).pack(side="left", padx=2)
         ttk.Button(ctrl_frame, text="🔄 Fetch Newer", command=lambda: self.fetch_tweets("newer")).pack(side="left", padx=4)
         ttk.Button(ctrl_frame, text="⏮️ Fetch Older", command=lambda: self.fetch_tweets("older")).pack(side="left", padx=4)
         ttk.Button(ctrl_frame, text="📥 Import Archive", command=self.import_archive_tweets).pack(side="left", padx=4)
@@ -661,7 +730,15 @@ Then go to Tab 3 – My Posts & Replies."""
 
         row3 = ttk.Frame(self.advanced_ctrl_frame)
         row3.pack(fill="x", pady=2)
-        ttk.Label(row3, text="Type Filter:").pack(side="left", padx=(4, 2))
+        ttk.Label(row3, text="Show:").pack(side="left", padx=(4, 2))
+        ttk.Combobox(
+            row3,
+            textvariable=self.show_source_var,
+            values=("All", "Flagged in last ToS review"),
+            state="readonly",
+            width=22
+        ).pack(side="left", padx=2)
+        ttk.Label(row3, text="Type Filter:").pack(side="left", padx=(8, 2))
         ttk.Combobox(
             row3,
             textvariable=self.type_filter_var,
@@ -803,12 +880,12 @@ Then go to Tab 3 – My Posts & Replies."""
         ttk.Label(parent, textvariable=self.compose_status_var, style="Status.TLabel").pack(anchor="w", padx=10, pady=5)
 
     def setup_ai_scrub_tab(self, parent):
-        ttk.Label(parent, text="AI Scrub", font=("Arial", 14, "bold"), style="Title.TLabel").pack(pady=(20, 10))
+        ttk.Label(parent, text="ToS review", font=("Arial", 14, "bold"), style="Title.TLabel").pack(pady=(20, 10))
         ttk.Label(
             parent,
             text=(
-                "Runs in batches and produces one combined search.\n"
-                "Uses model/endpoint/token from Tab 2 (Authorization). AI Scrub can only scan tweets you have fetched/imported into this app."
+                "Flags posts that might violate X Terms of Service (AI-assisted; you remain responsible). "
+                "Uses model, endpoint, and token from Tab 2. Only scans tweets you loaded via X API or import — not a substitute for fetching."
             ),
             style="Muted.TLabel",
             wraplength=750
@@ -820,7 +897,7 @@ Then go to Tab 3 – My Posts & Replies."""
         self.ai_scrub_source_var = tk.StringVar(value="selected")
         ttk.Radiobutton(source_frame, text="Selected queue items", variable=self.ai_scrub_source_var, value="selected").pack(side="left", padx=(0, 20))
         ttk.Radiobutton(source_frame, text="All loaded tweets", variable=self.ai_scrub_source_var, value="all").pack(side="left", padx=(0, 10))
-        ttk.Radiobutton(source_frame, text="Reload saved cache and scrub all", variable=self.ai_scrub_source_var, value="cache").pack(side="left", padx=(0, 10))
+        ttk.Radiobutton(source_frame, text="Reload saved cache and review all", variable=self.ai_scrub_source_var, value="cache").pack(side="left", padx=(0, 10))
         self.ai_scrub_warning_label = ttk.Label(source_frame, text="", style="Muted.TLabel")
         self.ai_scrub_warning_label.pack(side="left", padx=8)
 
@@ -829,9 +906,9 @@ Then go to Tab 3 – My Posts & Replies."""
             if source == "selected":
                 self.ai_scrub_warning_label.config(text="")
             elif source == "all":
-                self.ai_scrub_warning_label.config(text="Scans all tweets currently loaded in this session.")
+                self.ai_scrub_warning_label.config(text="Reviews all tweets currently loaded in this session.")
             else:
-                self.ai_scrub_warning_label.config(text="Reloads my_tweets.json, merges with loaded tweets, then scans all in batches.")
+                self.ai_scrub_warning_label.config(text="Reloads my_tweets.json, merges with memory, then reviews in batches.")
             self._refresh_ai_scrub_coverage_preview()
         self.ai_scrub_source_var.trace_add("write", on_source_change)
         on_source_change()
@@ -849,18 +926,18 @@ Then go to Tab 3 – My Posts & Replies."""
         coverage_btns = ttk.Frame(coverage_frame)
         coverage_btns.pack(anchor="w", pady=(6, 0))
         ttk.Button(coverage_btns, text="Refresh counts", command=self._refresh_ai_scrub_coverage_preview).pack(side="left", padx=(0, 8))
-        ttk.Label(coverage_btns, text="Import Archive lives in Tab 3.", style="Muted.TLabel").pack(side="left")
+        ttk.Label(coverage_btns, text="Load posts in Tab 3 (X API or archive).", style="Muted.TLabel").pack(side="left")
 
-        ttk.Label(parent, text="2. Describe what you want to find", font=("Arial", 11, "bold"), style="Title.TLabel").pack(anchor="w", padx=30, pady=(10, 0))
-        ttk.Label(parent, text="Example: complaints, old jokes, politics", style="Muted.TLabel").pack(anchor="w", padx=30, pady=(0, 2))
-        self.ai_scrub_prompt_text = tk.Text(parent, height=4, wrap="word", font=("Arial", 10))
+        ttk.Label(parent, text="2. Optional note for the model (focus areas)", font=("Arial", 11, "bold"), style="Title.TLabel").pack(anchor="w", padx=30, pady=(10, 0))
+        ttk.Label(parent, text="Leave empty for a general ToS pass.", style="Muted.TLabel").pack(anchor="w", padx=30, pady=(0, 2))
+        self.ai_scrub_prompt_text = tk.Text(parent, height=3, wrap="word", font=("Arial", 10))
         self._style_text_widget(self.ai_scrub_prompt_text)
         self.ai_scrub_prompt_text.pack(fill="x", padx=30, pady=5)
 
-        ttk.Label(parent, text="3. Run AI Scrub", font=("Arial", 11, "bold"), style="Title.TLabel").pack(anchor="w", padx=30, pady=(8, 0))
+        ttk.Label(parent, text="3. Run review", font=("Arial", 11, "bold"), style="Title.TLabel").pack(anchor="w", padx=30, pady=(8, 0))
         btn_run_frame = ttk.Frame(parent)
         btn_run_frame.pack(fill="x", padx=30, pady=10)
-        ttk.Button(btn_run_frame, text="Run AI Scrub", command=self._start_ai_scrub).pack(side="left", padx=(0, 8))
+        ttk.Button(btn_run_frame, text="Run ToS review", command=self._start_ai_scrub).pack(side="left", padx=(0, 8))
         self.ai_scrub_cancel_btn = ttk.Button(btn_run_frame, text="Cancel", command=self._cancel_ai_scrub, state="disabled")
         self.ai_scrub_cancel_btn.pack(side="left", padx=(0, 8))
         self.ai_scrub_progress_var = tk.StringVar(value="Idle.")
@@ -869,18 +946,16 @@ Then go to Tab 3 – My Posts & Replies."""
         results_frame = ttk.LabelFrame(parent, text=" Results ", padding=10)
         results_frame.pack(fill="both", expand=True, padx=30, pady=10)
         self.ai_scrub_compiled_var = tk.StringVar(value="")
-        ttk.Label(results_frame, text="Compiled search:").pack(anchor="w")
+        ttk.Label(results_frame, text="Last run summary:").pack(anchor="w")
         ttk.Label(results_frame, textvariable=self.ai_scrub_compiled_var, style="Muted.TLabel", wraplength=650).pack(anchor="w", pady=(0, 4))
         self.ai_scrub_result_var = tk.StringVar(value="")
         ttk.Label(results_frame, textvariable=self.ai_scrub_result_var, style="Muted.TLabel").pack(anchor="w", pady=(0, 8))
         action_frame = ttk.Frame(results_frame)
         action_frame.pack(fill="x")
-        self.ai_scrub_apply_btn = ttk.Button(action_frame, text="Apply search to Posts tab", command=self._ai_scrub_apply_search, state="disabled")
+        self.ai_scrub_apply_btn = ttk.Button(action_frame, text="Show flagged on Posts tab (Tab 3)", command=self._ai_scrub_apply_search, state="disabled")
         self.ai_scrub_apply_btn.pack(side="left", padx=(0, 8))
-        self.ai_scrub_add_queue_btn = ttk.Button(action_frame, text="Queue all matched tweets", command=self._ai_scrub_add_all_to_queue, state="disabled")
+        self.ai_scrub_add_queue_btn = ttk.Button(action_frame, text="Queue all flagged tweets", command=self._ai_scrub_add_all_to_queue, state="disabled")
         self.ai_scrub_add_queue_btn.pack(side="left", padx=8)
-        self.ai_scrub_last_compiled = ""
-        self.ai_scrub_last_use_regex = False
         self._ai_scrub_running = False
 
     def _read_saved_tweets(self):
@@ -947,27 +1022,28 @@ Then go to Tab 3 – My Posts & Replies."""
         self.ai_scrub_progress_var.set("Cancelling after current batch...")
         self.ai_scrub_cancel_btn.config(state="disabled")
 
+    _TOS_SYSTEM_PROMPT = (
+        "You review X (Twitter) post text for possible Terms of Service or community rule issues "
+        "(abuse, hateful conduct, violence, illegal activity, doxxing, manipulation, etc.). The user will send post lines as "
+        "\"id: …\" then \"text: …\" for each post. Return ONLY valid JSON, no markdown or commentary. Use this shape: "
+        "{\"flagged\":[{\"id\":\"<same id string as input>\",\"level\":\"low|medium|high\",\"reason\":\"brief\"}]}. "
+        "Omit posts that are clearly fine. If none, return {\"flagged\":[]}. Use the exact id strings from the user message."
+    )
+
     def _start_ai_scrub(self):
-        prompt = (self.ai_scrub_prompt_text.get("1.0", tk.END) or "").strip()
-        if not prompt:
-            messagebox.showinfo("AI Scrub", "Enter a goal (e.g. tweets to delete: complaints, politics).")
-            return
+        extra = (self.ai_scrub_prompt_text.get("1.0", tk.END) or "").strip()
         token = (self.ai_token_var.get() or "").strip()
         if not token:
-            messagebox.showerror("AI Scrub", "Set an API token in Tab 2 (Authorization) and save.")
+            messagebox.showerror("ToS review", "Set an API token in Tab 2 (Authorization) and save.")
             return
         source = self.ai_scrub_source_var.get() or "selected"
         tweets = self._get_ai_scrub_source_tweets(source, apply_merge=(source == "cache"))
         if source == "selected" and not tweets:
-            messagebox.showinfo("AI Scrub", "Add tweets to the queue first (Posts & Replies), or choose an all-tweets mode.")
+            messagebox.showinfo("ToS review", "Add tweets to the queue first, or choose all loaded / cache mode.")
             return
         if not tweets:
-            messagebox.showinfo("AI Scrub", "No tweets loaded. Fetch/import tweets first, then run AI Scrub.")
+            messagebox.showinfo("ToS review", "No tweets loaded. Fetch with the X API or import in Tab 3, then run again.")
             return
-        if source in ("all", "cache") and len(tweets) < 500:
-            self.ai_scrub_progress_var.set(
-                "AI Scrub scans loaded tweets. For full account history, fetch older until exhausted or import archive."
-            )
         model = (self.ai_model_var.get() or "").strip() or (AI_MODELS[0] if AI_MODELS else "")
         endpoint = (self.ai_endpoint_var.get() or "").strip().rstrip("/") or AI_ENDPOINT_DEFAULT
         self._ai_scrub_running = True
@@ -981,26 +1057,39 @@ Then go to Tab 3 – My Posts & Replies."""
             try:
                 batches = list(build_ai_batches(tweets, model))
                 total = len(batches)
-                responses = []
-                processed_rows = 0
+                acc = set()
+                processed = 0
                 for i, batch in enumerate(batches):
                     if not self._ai_scrub_running:
                         break
-                    msg = f"Batch {i + 1} of {total} | processed {processed_rows}/{len(tweets)} rows"
+                    msg = f"ToS batch {i + 1} of {total} | rows {processed}/{len(tweets)}"
                     self.root.after(0, lambda m=msg: self.ai_scrub_progress_var.set(m))
-                    batch_text = "\n---\n".join((t.get("text") or "") for t in batch)
-                    user_prompt = f"Goal: {prompt}\n\nTweets in this batch:\n{batch_text}"
+                    lines = []
+                    for t in batch:
+                        tid = str(t.get("id", "")).strip()
+                        if not tid:
+                            continue
+                        body = (t.get("text") or "")[:2000]
+                        lines.append(f"id: {tid}\ntext: {body}")
+                    if not lines:
+                        processed += len(batch)
+                        continue
+                    user_prompt = "Optional reviewer note from user: " + (extra or "(none)") + "\n\nPosts in this batch:\n\n" + "\n\n".join(lines)
                     try:
-                        q = self._call_ai_reviewer(endpoint, model, token, user_prompt)
-                        if q:
-                            responses.append(q)
-                        processed_rows += len(batch)
+                        text = self._call_ai_chat(
+                            endpoint, model, token, self._TOS_SYSTEM_PROMPT, user_prompt, max_tokens=4096, timeout_sec=90
+                        )
                     except Exception as e:
-                        self.root.after(0, lambda err=self._sanitize_for_display(str(e)): messagebox.showerror("AI Scrub batch error", err))
-                        break
-                self.root.after(0, lambda r=responses: self._on_ai_scrub_done(r))
+                        self.root.after(0, lambda err=self._sanitize_for_display(str(e)): messagebox.showerror("ToS review batch", err))
+                        self.root.after(0, self._ai_scrub_clear_results_on_error)
+                        return
+                    ids = self._parse_tos_ids_from_response(text) if text else set()
+                    if ids is not None:
+                        acc |= ids
+                    processed += len(batch)
+                self.root.after(0, lambda acc=set(acc), tr=len(tweets): self._on_tos_done(acc, tr))
             except Exception as e:
-                self.root.after(0, lambda err=self._sanitize_for_display(str(e)): messagebox.showerror("AI Scrub", err))
+                self.root.after(0, lambda err=self._sanitize_for_display(str(e)): messagebox.showerror("ToS review", err))
                 self.root.after(0, lambda: self.ai_scrub_progress_var.set("Error."))
                 self.root.after(0, lambda: self.ai_scrub_apply_btn.config(state="disabled"))
                 self.root.after(0, lambda: self.ai_scrub_add_queue_btn.config(state="disabled"))
@@ -1012,49 +1101,59 @@ Then go to Tab 3 – My Posts & Replies."""
         threading.Thread(target=run, daemon=True).start()
 
     def _ai_scrub_clear_results_on_error(self):
-        """Clear AI Scrub result display to 0 matched when run fails before/during batches (main-thread only)."""
-        self.ai_scrub_last_compiled = ""
-        self.ai_scrub_compiled_var.set("(error – no query)")
-        self.ai_scrub_result_var.set("Matched 0 tweet(s).")
+        self.ai_scrub_compiled_var.set("(error)")
+        self.ai_scrub_result_var.set("0 flagged in last run.")
+        self.ai_scrub_progress_var.set("Error.")
 
-    def _on_ai_scrub_done(self, responses):
-        self.ai_scrub_progress_var.set("Compiling…")
-        self.root.update_idletasks()
-        use_regex = self.use_regex_var.get()
-        compiled, use_regex_final = self._compile_ai_responses(responses, use_regex)
-        self.ai_scrub_last_compiled = compiled or ""
-        self.ai_scrub_last_use_regex = use_regex_final
-        if not compiled:
-            self.ai_scrub_compiled_var.set("(no query)")
-            self.ai_scrub_result_var.set("Matched 0 tweet(s).")
-            self.ai_scrub_progress_var.set("Done. Matched 0 tweets.")
-        else:
-            self.ai_scrub_compiled_var.set(compiled)
-            self._apply_ai_compiled_search(compiled, use_regex_final)
-            matched = len(self._get_display_tweets())
-            self.ai_scrub_result_var.set(f"Matched {matched} tweet(s).")
-            self.ai_scrub_progress_var.set(f"Done. Matched {matched} tweets.")
+    def _on_tos_done(self, flagged_ids, total_rows):
+        """Main thread: apply ToS result filter on Posts tab."""
+        self._tos_flagged_ids = {str(x) for x in flagged_ids}
+        valid = {str(t.get("id")) for t in self.tweets if t.get("id")}
+        self._tos_flagged_ids &= valid
+        n = len(self._tos_flagged_ids)
+        self.ai_scrub_compiled_var.set(
+            f"Model returned {n} id(s) matching your loaded posts (out of {total_rows} reviewed)."
+        )
+        self.ai_scrub_result_var.set(
+            f"Flagged: {n} post(s). Tab 3 → Show → \"Flagged in last ToS review\" to filter the list."
+        )
+        self.ai_scrub_progress_var.set(f"Done. {n} id(s) flagged across batches.")
+        self.show_source_var.set("Flagged in last ToS review")
+        self.search_filter_query = ""
+        self.search_filter_regex = False
+        self.search_var.set("")
+        self.type_filter_var.set("all")
+        self.date_sort_var.set("newest")
+        self.refresh_tweets_list()
+        self.update_delete_preview()
         self.ai_scrub_apply_btn.config(state="normal")
-        self.ai_scrub_add_queue_btn.config(state="normal")
+        self.ai_scrub_add_queue_btn.config(state="normal" if n else "disabled")
         self.ai_scrub_cancel_btn.config(state="disabled")
 
     def _ai_scrub_apply_search(self):
-        if self.ai_scrub_last_compiled:
-            self._apply_ai_compiled_search(self.ai_scrub_last_compiled, self.ai_scrub_last_use_regex)
-            matched = len(self._get_display_tweets())
-            self.ai_scrub_result_var.set(f"Matched {matched} tweet(s).")
-            messagebox.showinfo("AI Scrub", f"Applied search. Showing {matched} tweet(s).")
+        if not self._tos_flagged_ids:
+            messagebox.showinfo("ToS review", "Run a ToS review first, or there were no flags.")
+            return
+        self.show_source_var.set("Flagged in last ToS review")
+        self.apply_simple_view()
+        matched = len(self._get_display_tweets())
+        self.ai_scrub_result_var.set(f"Showing {matched} flagged post(s) on Tab 3.")
+        self.notebook.select(2)
+        messagebox.showinfo("ToS review", f"Tab 3 is showing {matched} flagged post(s).")
 
     def _ai_scrub_add_all_to_queue(self):
-        if self.ai_scrub_last_compiled:
-            self._apply_ai_compiled_search(self.ai_scrub_last_compiled, self.ai_scrub_last_use_regex)
+        if not self._tos_flagged_ids:
+            messagebox.showinfo("ToS review", "Run a ToS review first, or there were no flags.")
+            return
+        self.show_source_var.set("Flagged in last ToS review")
+        self.apply_simple_view()
         for t in self._get_display_tweets():
             t["selected"] = True
         self.refresh_tweets_list()
         self.update_delete_preview()
         count = len(self._get_display_tweets())
         self.notebook.select(4)
-        messagebox.showinfo("AI Scrub", f"Added {count} match(es) to the deletion queue.")
+        messagebox.showinfo("ToS review", f"Selected {count} post(s) for the deletion queue (Tab 5).")
 
     # ====================== CREDENTIALS ======================
     def load_credentials(self):
@@ -1070,6 +1169,8 @@ Then go to Tab 3 – My Posts & Replies."""
                 self.ai_endpoint_var.set(creds.get("ai_endpoint", AI_ENDPOINT_DEFAULT))
                 self.ai_model_var.set(creds.get("ai_model", AI_MODELS[0] if AI_MODELS else ""))
                 self.ai_token_var.set(creds.get("ai_token", ""))
+                self.x_username_var.set(creds.get("x_username", ""))
+                self._update_x_account_display()
                 self.init_client()
             except (json.JSONDecodeError, OSError, KeyError):
                 pass
@@ -1092,6 +1193,7 @@ Then go to Tab 3 – My Posts & Replies."""
             "ai_endpoint": self.ai_endpoint_var.get().strip() or AI_ENDPOINT_DEFAULT,
             "ai_model": self.ai_model_var.get().strip() or (AI_MODELS[0] if AI_MODELS else ""),
             "ai_token": self.ai_token_var.get().strip(),
+            "x_username": self.x_username_var.get().strip(),
         }
         with open(CREDENTIALS_FILE, "w", encoding="utf-8") as f:
             json.dump(creds, f, indent=2)
@@ -1314,6 +1416,17 @@ Then go to Tab 3 – My Posts & Replies."""
             me = self.user_client.get_me(user_fields=["username"], user_auth=True)
             username = getattr(me.data, "username", "unknown")
             user_id = getattr(me.data, "id", "unknown")
+            self.x_username_var.set(username)
+            self._update_x_account_display()
+            if os.path.exists(CREDENTIALS_FILE):
+                try:
+                    with open(CREDENTIALS_FILE, encoding="utf-8") as f:
+                        creds = json.load(f)
+                    creds["x_username"] = username
+                    with open(CREDENTIALS_FILE, "w", encoding="utf-8") as f:
+                        json.dump(creds, f, indent=2)
+                except (json.JSONDecodeError, OSError, KeyError):
+                    pass
             probe = self.user_client.get_users_tweets(id=user_id, max_results=5, user_auth=True)
             fetched = len(probe.data) if probe and probe.data else 0
             messagebox.showinfo(
@@ -1517,16 +1630,17 @@ Then go to Tab 3 – My Posts & Replies."""
 
     # ====================== FETCH ======================
     def fetch_tweets(self, direction="newer"):
+        """Fetch newer or older tweets via X API. Returns list of added tweet IDs, or None on error/early return."""
         if direction not in ("newer", "older"):
             direction = "newer"
         if not self.user_client and not self.bearer_client:
             self.init_client()
         if not self.user_client:
             messagebox.showerror("Error", "User auth credentials are required to resolve your account. Fill Tab 2 (Authorization) first.")
-            return
+            return None
         if not self.read_client:
             messagebox.showerror("Error", "Please set up credentials first (Tab 2 – Authorization).")
-            return
+            return None
         self.status_var.set(f"Fetching {direction} tweets...")
         self.root.update()
         try:
@@ -1577,17 +1691,19 @@ Then go to Tab 3 – My Posts & Replies."""
                     raise primary_error
 
             existing = {t["id"] for t in self.tweets}
-            added = 0
+            added_ids = []
             for nt in all_new:
                 if nt["id"] not in existing:
                     self.tweets.append(nt)
-                    added += 1
+                    added_ids.append(nt["id"])
+                    existing.add(nt["id"])
             self.tweets.sort(key=lambda x: x["created_at"], reverse=True)
             self.save_tweets()
             self.refresh_tweets_list()
             self.update_delete_preview()
             self._refresh_ai_scrub_coverage_preview()
-            messagebox.showinfo("Done", f"Added {added} {direction} tweet(s). Total now: {len(self.tweets)}")
+            messagebox.showinfo("Done", f"Added {len(added_ids)} {direction} tweet(s). Total now: {len(self.tweets)}")
+            return added_ids
         except Exception as e:
             details = self._build_error_details(e)
             if self._status_code_from_error(e) == 401:
@@ -1598,86 +1714,23 @@ Then go to Tab 3 – My Posts & Replies."""
                     "• If bearer token starts with 'Bearer ', paste just the token string."
                 )
             messagebox.showerror("Fetch Error", details)
+            return None
         finally:
             self.status_var.set("Ready")
 
-    # ====================== AI REVIEWER ======================
-    def open_ai_reviewer(self):
-        win = tk.Toplevel(self.root)
-        win.title("AI Reviewer")
-        win.geometry("520x280")
-        win.configure(bg=self.theme["panel_bg"])
-        prompt_text = tk.Text(win, height=8, wrap="word", font=("Arial", 11))
-        self._style_text_widget(prompt_text)
-        prompt_text.pack(fill="both", expand=True, padx=10, pady=10)
-        default_prompt = "Ask the AI what you're looking for"
-        prompt_text.insert("1.0", default_prompt)
-        prompt_text.focus_set()
-
-        def send():
-            prompt = prompt_text.get("1.0", tk.END).strip()
-            if not prompt or prompt == default_prompt:
-                messagebox.showinfo("AI Reviewer", "Enter a question or description (e.g. tweets about X, replies from 2023).")
-                return
-            token = self.ai_token_var.get().strip()
-            if not token:
-                messagebox.showerror("AI Reviewer", "Set an API token in Tab 2 – Authorization (AI Reviewer section) and save.")
-                return
-            endpoint = (self.ai_endpoint_var.get().strip() or AI_ENDPOINT_DEFAULT).rstrip("/")
-            model = self.ai_model_var.get().strip() or (AI_MODELS[0] if AI_MODELS else "")
-            try:
-                query = self._call_ai_reviewer(endpoint, model, token, prompt)
-                if query:
-                    self.search_var.set(query)
-                    self.search_and_select()
-                    win.destroy()
-                    self.status_var.set("Filter applied from AI suggestion.")
-                else:
-                    messagebox.showinfo("AI Reviewer", "No search suggestion returned. Try rephrasing.")
-            except Exception as e:
-                messagebox.showerror("AI Reviewer", self._sanitize_for_display(str(e)))
-
-        btn_frame = ttk.Frame(win)
-        btn_frame.pack(fill="x", padx=10, pady=(0, 10))
-        ttk.Button(btn_frame, text="Send", command=send).pack(side="left", padx=4)
-
-    def _compile_ai_responses(self, responses, use_regex):
-        """Combine batch response strings into one search query. Returns (compiled_query, use_regex)."""
-        parts = [s.strip() for s in responses if (s or "").strip()]
-        if not parts:
-            return "", False
-        if use_regex:
-            combined = "|".join(parts)
-            try:
-                re.compile(self._normalize_for_search(combined))
-                return combined, True
-            except re.error:
-                pass
-        return ",".join(parts), False
-
-    def _apply_ai_compiled_search(self, compiled_query, use_regex):
-        """Set search filter to compiled query and refresh list/queue."""
-        self.search_filter_query = compiled_query or ""
-        self.search_filter_regex = use_regex
-        self.search_var.set(compiled_query)
-        self.use_regex_var.set(use_regex)
-        self.refresh_tweets_list()
-        self.update_delete_preview()
-
-    def _call_ai_reviewer(self, endpoint, model, token, user_prompt):
-        """Call OpenAI-compatible chat API. Returns suggested search string. Never logs token."""
+    def _call_ai_chat(self, endpoint, model, token, system_prompt, user_prompt, max_tokens=4096, timeout_sec=60):
+        """OpenAI-compatible chat; returns assistant message content. Never logs token."""
         base = (endpoint or "").strip().rstrip("/")
         url = f"{base}/chat/completions"
         payload = json.dumps({
             "model": model,
             "messages": [
-                {"role": "system", "content": "You help filter a list of tweets. Reply with ONLY a short search query or regex (one line) that would find the tweets the user wants. No explanation, no quotes, just the search string."},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            "max_tokens": 200,
+            "max_tokens": max_tokens,
         }).encode("utf-8")
-        _ai_logger.info("AI request | endpoint=%s | model=%s | prompt_len=%d", endpoint, model, len(user_prompt))
-        _ai_logger.debug("AI request prompt (truncated): %s", (user_prompt[:200] + "..." if len(user_prompt) > 200 else user_prompt))
+        _ai_logger.info("AI chat | endpoint=%s | model=%s | user_len=%d", endpoint, model, len(user_prompt))
         req = Request(url, data=payload, method="POST", headers={
             "Content-Type": "application/json",
             "Accept": "application/json",
@@ -1685,28 +1738,108 @@ Then go to Tab 3 – My Posts & Replies."""
             "User-Agent": AI_REQUEST_USER_AGENT,
         })
         try:
-            with urlopen(req, timeout=30) as resp:
+            with urlopen(req, timeout=timeout_sec) as resp:
                 raw = resp.read().decode("utf-8")
                 data = json.loads(raw)
-            _ai_logger.info("AI response OK | model=%s | response_len=%d", model, len(raw))
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")[:500]
-            _ai_logger.warning("AI HTTP error | status=%s | endpoint=%s | model=%s | body=%s", e.code, endpoint, model, self._sanitize_for_display(body)[:300])
+            _ai_logger.warning("AI HTTP | status=%s | body=%s", e.code, self._sanitize_for_display(body)[:300])
             raise RuntimeError(f"AI API error {e.code}: {self._sanitize_for_display(body)}")
         except urllib.error.URLError as e:
-            _ai_logger.warning("AI request failed | endpoint=%s | reason=%s", endpoint, self._sanitize_for_display(str(e.reason)))
+            _ai_logger.warning("AI request failed | reason=%s", self._sanitize_for_display(str(e.reason)))
             raise RuntimeError(f"AI API request failed: {self._sanitize_for_display(str(e.reason))}")
+        _ai_logger.info("AI response OK | model=%s | len=%d", model, len(raw))
         choice = (data.get("choices") or [None])[0]
         if not choice:
-            _ai_logger.debug("AI response had no choices")
             return None
         content = (choice.get("message") or {}).get("content")
-        if not content:
-            _ai_logger.debug("AI response choice had no content")
+        return content.strip() if content else None
+
+    def _extract_json_payload_from_text(self, text):
+        """Best-effort extraction of JSON payload from model output."""
+        if not text:
             return None
-        result = content.strip().split("\n")[0].strip()
-        _ai_logger.debug("AI suggested query: %s", (result[:150] + "..." if len(result) > 150 else result))
-        return result
+        raw = text.strip()
+        # 1) whole-text JSON
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            pass
+
+        # 2) fenced blocks: ```json ... ```
+        for match in re.finditer(r"```(?:json)?\s*(.*?)```", raw, flags=re.IGNORECASE | re.DOTALL):
+            snippet = (match.group(1) or "").strip()
+            if not snippet:
+                continue
+            try:
+                return json.loads(snippet)
+            except json.JSONDecodeError:
+                continue
+
+        # 3) first balanced [] or {}
+        starts = [i for i in (raw.find("["), raw.find("{")) if i != -1]
+        if not starts:
+            return None
+        start = min(starts)
+        opening = raw[start]
+        closing = "]" if opening == "[" else "}"
+        depth = 0
+        in_string = False
+        escaped = False
+        end = -1
+        for i in range(start, len(raw)):
+            ch = raw[i]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == "\"":
+                    in_string = False
+                continue
+            if ch == "\"":
+                in_string = True
+                continue
+            if ch == opening:
+                depth += 1
+            elif ch == closing:
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if end == -1:
+            return None
+        try:
+            return json.loads(raw[start:end])
+        except json.JSONDecodeError:
+            return None
+
+    def _parse_tos_ids_from_response(self, text):
+        """Return set of str tweet id values from model JSON, or None if unparseable."""
+        payload = self._extract_json_payload_from_text(text or "")
+        if payload is None:
+            return None
+        if isinstance(payload, list):
+            rows = payload
+        elif isinstance(payload, dict):
+            rows = None
+            for k in ("flagged", "items", "tweets", "results", "violations"):
+                v = payload.get(k)
+                if isinstance(v, list):
+                    rows = v
+                    break
+            if rows is None:
+                rows = []
+        else:
+            return None
+        out = set()
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            tid = item.get("id") or item.get("id_str") or item.get("post_id")
+            if tid is not None:
+                out.add(str(tid).strip())
+        return out
 
     # ====================== SEARCH (Regex supported) ======================
     def search_and_select(self):
@@ -1784,6 +1917,7 @@ Then go to Tab 3 – My Posts & Replies."""
         self.update_delete_preview()
 
     def reset_simple_view(self):
+        self.show_source_var.set("All")
         self.type_filter_var.set("all")
         self.date_sort_var.set("newest")
         self.refresh_tweets_list()
@@ -1892,6 +2026,8 @@ Then go to Tab 3 – My Posts & Replies."""
 
     def _get_display_tweets(self):
         display_tweets = list(self.tweets)
+        if (self.show_source_var.get() or "").strip() == "Flagged in last ToS review" and self._tos_flagged_ids:
+            display_tweets = [t for t in display_tweets if str(t.get("id", "")) in self._tos_flagged_ids]
         search_query = (self.search_filter_query or "").strip()
         if search_query:
             if self.search_filter_regex:
@@ -2420,6 +2556,722 @@ Then go to Tab 3 – My Posts & Replies."""
             details = self._build_error_details(e)
             self.compose_status_var.set("Post failed: " + self._sanitize_for_display(str(e))[:80])
             messagebox.showerror("Post Failed", details)
+
+    # ====================== FOLLOWS (social graph) ======================
+    def setup_follows_tab(self, parent):
+        top = ttk.Frame(parent)
+        top.pack(fill="x", padx=6, pady=6)
+        ttk.Label(top, text="Following & followers (X API; requires appropriate tier).", style="Muted.TLabel").pack(side="left", padx=4)
+        ttk.Button(top, text="Refresh following & followers", command=self._follows_start_refresh).pack(side="right", padx=4)
+        ttk.Label(top, textvariable=self.follows_status, style="Status.TLabel", wraplength=500).pack(side="left", padx=8)
+
+        sub = ttk.Notebook(parent)
+        sub.pack(fill="both", expand=True, padx=4, pady=4)
+        for key, title, actions in [
+            ("following", "All following", "unf"),
+            ("followers", "All followers", "fol"),
+            ("not_back", "I follow, they do not", "unf"),
+            ("candidates", "They follow, I do not", "fol"),
+        ]:
+            f = ttk.Frame(sub)
+            sub.add(f, text=title)
+            ctrl = ttk.Frame(f)
+            ctrl.pack(fill="x", padx=2, pady=2)
+            ttk.Button(ctrl, text="Select all", command=lambda k=key: self._follows_select_mode(k, True)).pack(side="left", padx=2)
+            ttk.Button(ctrl, text="Deselect all", command=lambda k=key: self._follows_select_mode(k, False)).pack(side="left", padx=2)
+            if "unf" in actions or actions == "unf":
+                ttk.Button(ctrl, text="Unfollow selected", command=lambda k=key: self._follows_bulk_unfollow(k)).pack(side="right", padx=4)
+            if "fol" in actions or actions == "fol":
+                ttk.Button(ctrl, text="Follow selected", command=lambda k=key: self._follows_bulk_follow(k)).pack(side="right", padx=4)
+
+            canvas = tk.Canvas(f, background=self.theme["input_bg"], height=300)
+            sb = ttk.Scrollbar(f, orient="vertical", command=canvas.yview)
+            inner = ttk.Frame(canvas)
+            inner.bind("<Configure>", lambda e, c=canvas: c.configure(scrollregion=c.bbox("all")))
+            canvas.create_window((0, 0), window=inner, anchor="nw")
+            canvas.configure(yscrollcommand=sb.set)
+            canvas.pack(side="left", fill="both", expand=True)
+            sb.pack(side="right", fill="y")
+            self._bind_social_canvas_wheel(canvas)
+            self._follows_scroll[key] = (canvas, inner)
+        self._sub_follows = sub
+        self.refresh_follows_panels()
+
+    def _bind_social_canvas_wheel(self, canvas):
+        def on_wheel(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        if sys.platform == "darwin":
+            canvas.bind_all("<MouseWheel>", on_wheel)
+        else:
+            canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
+            canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
+
+    def _get_follows_list_for(self, key):
+        fset = {x["id"] for x in self.following_list}
+        rset = {x["id"] for x in self.follower_list}
+        if key == "following":
+            return self.following_list
+        if key == "followers":
+            return self.follower_list
+        if key == "not_back":
+            return [u for u in self.following_list if u["id"] not in rset]
+        if key == "candidates":
+            return [u for u in self.follower_list if u["id"] not in fset]
+        return []
+
+    def refresh_follows_panels(self):
+        fset = {x["id"] for x in self.following_list}
+        for key, (canvas, inner) in self._follows_scroll.items():
+            for w in inner.winfo_children():
+                w.destroy()
+            users = self._get_follows_list_for(key)
+            for u in users:
+                u.setdefault("selected", False)
+                row = ttk.Frame(inner, padding=2)
+                row.pack(fill="x")
+                ch = tk.BooleanVar(value=u.get("selected", False))
+                uid = u["id"]
+
+                def on_t(b=ch, uu=u):
+                    uu["selected"] = b.get()
+
+                tk.Checkbutton(
+                    row,
+                    variable=ch,
+                    command=on_t,
+                    bg=self.theme["panel_bg"],
+                    fg=self.theme["text"],
+                    selectcolor=self.theme["panel_alt"],
+                    activebackground=self.theme["panel_bg"],
+                ).pack(side="left", padx=2)
+                ttk.Label(
+                    row,
+                    text=f"@{u.get('username', '?')}  {u.get('name', '')[:40]}",
+                    width=45,
+                    anchor="w",
+                ).pack(side="left", fill="x", expand=True, padx=2)
+                if key == "following" or key == "not_back":
+                    ttk.Button(
+                        row,
+                        text="Unfollow",
+                        width=9,
+                        command=lambda uu=dict(u): self._follows_unfollow_one(uu),
+                    ).pack(side="right", padx=2)
+                elif key == "followers":
+                    if uid in fset:
+                        ttk.Button(
+                            row,
+                            text="Unfollow",
+                            width=9,
+                            command=lambda uu=dict(u): self._follows_unfollow_one(uu),
+                        ).pack(side="right", padx=2)
+                    else:
+                        ttk.Button(
+                            row,
+                            text="Follow",
+                            width=9,
+                            command=lambda uu=dict(u): self._follows_follow_one(uu),
+                        ).pack(side="right", padx=2)
+                else:
+                    ttk.Button(
+                        row,
+                        text="Follow",
+                        width=9,
+                        command=lambda uu=dict(u): self._follows_follow_one(uu),
+                    ).pack(side="right", padx=2)
+            canvas.update_idletasks()
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        for key in self._follows_scroll:
+            cvs, _ = self._follows_scroll[key]
+            cvs.yview_moveto(0)
+
+    def _follows_select_mode(self, key, select_all):
+        ulist = self._get_follows_list_for(key)
+        for u in ulist:
+            u["selected"] = select_all
+        self.refresh_follows_panels()
+
+    def _follows_get_selected(self, key):
+        return [u for u in self._get_follows_list_for(key) if u.get("selected")]
+
+    def _follows_start_refresh(self):
+        if not self.client:
+            self.init_client()
+        if not self.client:
+            messagebox.showerror("Error", "Please set up credentials in Tab 2 (Authorization) first.")
+            return
+        self.follows_status.set("Loading… this may take a while.")
+        threading.Thread(target=self._thread_fetch_follows, daemon=True).start()
+
+    def _thread_fetch_follows(self):
+        err = None
+        try:
+            me = self.client.get_me()
+            if not me or not me.data:
+                raise RuntimeError("get_me() returned no user")
+            uid = str(me.data.id)
+            following = self._paginate_user_list(self.client.get_users_following, uid)
+            time.sleep(1.0)
+            followers = self._paginate_user_list(self.client.get_users_followers, uid)
+            for u in following + followers:
+                u["selected"] = False
+            def apply():
+                self.me_id = uid
+                self.following_list = following
+                self.follower_list = followers
+                self.follows_status.set(
+                    f"OK — following {len(following)}, followers {len(followers)}"
+                )
+                self.refresh_follows_panels()
+            self.root.after(0, apply)
+        except Exception as e:
+            err = str(e)
+
+            def errbox():
+                self.follows_status.set("Error: " + err)
+                messagebox.showerror("Follows load error", err)
+
+            self.root.after(0, errbox)
+
+    def _paginate_user_list(self, method, user_id):
+        out = []
+        token = None
+        while True:
+            resp = method(
+                int(user_id),
+                max_results=1000,
+                user_fields=["username", "name"],
+                pagination_token=token,
+                user_auth=True,
+            )
+            if resp and resp.data:
+                for u in resp.data:
+                    out.append(
+                        {
+                            "id": str(u.id),
+                            "username": (u.username or "")[:80],
+                            "name": (getattr(u, "name", None) or "")[:80],
+                            "selected": False,
+                        }
+                    )
+            meta = resp.meta or {}
+            token = None
+            if isinstance(meta, dict):
+                token = meta.get("next_token")
+            elif meta is not None and hasattr(meta, "next_token"):
+                token = getattr(meta, "next_token", None)
+            if not token:
+                break
+            time.sleep(1.0)
+        return out
+
+    def _follows_follow_one(self, u):
+        if not self.client:
+            return
+        threading.Thread(target=self._thread_follow, args=([u],), daemon=True).start()
+
+    def _follows_unfollow_one(self, u):
+        if not self.client:
+            return
+        threading.Thread(target=self._thread_unfollow, args=([u],), daemon=True).start()
+
+    def _follows_bulk_follow(self, key):
+        users = [u for u in self._follows_get_selected(key)]
+        fset = {x["id"] for x in self.following_list}
+        users = [u for u in users if u["id"] not in fset]
+        if not users:
+            messagebox.showinfo("Info", "No accounts to follow (or none selected, or you already follow them).")
+            return
+        if not messagebox.askyesno("Confirm", f"Follow {len(users)} account(s)?"):
+            return
+        if not self.client:
+            return
+        threading.Thread(target=self._thread_follow, args=(users,), daemon=True).start()
+
+    def _follows_bulk_unfollow(self, key):
+        users = [u for u in self._follows_get_selected(key) if u["id"] in {x["id"] for x in self.following_list}]
+        if not users:
+            messagebox.showinfo("Info", "No accounts to unfollow (or none selected).")
+            return
+        if not messagebox.askyesno("Confirm", f"Unfollow {len(users)} account(s)?"):
+            return
+        if not self.client:
+            return
+        threading.Thread(target=self._thread_unfollow, args=(users,), daemon=True).start()
+
+    def _thread_follow(self, users):
+        done = 0
+        try:
+            for u in users:
+                fset = {x["id"] for x in self.following_list}
+                try:
+                    if u["id"] in fset:
+                        continue
+                    self.client.follow_user(u["id"])
+                    if not any(x["id"] == u["id"] for x in self.following_list):
+                        self.following_list.append(
+                            {
+                                "id": u["id"],
+                                "username": u.get("username", "") or "",
+                                "name": u.get("name", "") or "",
+                                "selected": False,
+                            }
+                        )
+                    done += 1
+                except Exception as e:
+                    em = str(e)
+
+                    def _f_err(m=em):
+                        self.follows_status.set("Error: " + m)
+
+                    self.root.after(0, _f_err)
+                time.sleep(0.5)
+        finally:
+
+            def fin():
+                self.refresh_follows_panels()
+                self.follows_status.set(f"Followed {done} account(s) in this run.")
+
+            self.root.after(0, fin)
+
+    def _thread_unfollow(self, users):
+        done = 0
+        try:
+            for u in users:
+                try:
+                    self.client.unfollow_user(u["id"])
+                    self.following_list = [x for x in self.following_list if x["id"] != u["id"]]
+                    done += 1
+                except Exception as e:
+                    em = str(e)
+
+                    def _u_err(m=em):
+                        self.follows_status.set("Error: " + m)
+
+                    self.root.after(0, _u_err)
+                time.sleep(0.5)
+        finally:
+
+            def fin():
+                self.refresh_follows_panels()
+                self.follows_status.set(f"Unfollowed {done} in this run.")
+
+            self.root.after(0, fin)
+
+    # ====================== BLOCKS & MUTES ======================
+    def setup_blocks_mutes_tab(self, parent):
+        top = ttk.Frame(parent)
+        top.pack(fill="x", padx=4, pady=4)
+        ttk.Button(top, text="Refresh blocked & muted", command=self._blocks_start_refresh).pack(side="right", padx=4)
+        ttk.Label(top, textvariable=self.blocks_status, style="Status.TLabel", wraplength=500).pack(side="left", padx=4)
+
+        sub = ttk.Notebook(parent)
+        sub.pack(fill="both", expand=True, padx=2, pady=2)
+        bframe = ttk.Frame(sub)
+        mframe = ttk.Frame(sub)
+        sub.add(bframe, text="Blocked")
+        sub.add(mframe, text="Muted")
+
+        for label, f, is_block in (("unblock", bframe, True), ("unmute", mframe, False)):
+            ctrl = ttk.Frame(f)
+            ctrl.pack(fill="x", padx=2, pady=2)
+            ttk.Button(
+                ctrl,
+                text="Select all",
+                command=lambda ib=is_block, v=True: self._blocks_select(ib, v),
+            ).pack(side="left", padx=2)
+            ttk.Button(
+                ctrl,
+                text="Deselect all",
+                command=lambda ib=is_block, v=False: self._blocks_select(ib, v),
+            ).pack(side="left", padx=2)
+            ttk.Button(
+                ctrl,
+                text=("Unblock selected" if is_block else "Unmute selected"),
+                command=lambda ib=is_block: self._blocks_bulk_un(ib),
+            ).pack(side="right", padx=2)
+
+        self._bb_canvas, self._bb_inner = self._build_scroll(bframe)
+        self._mm_canvas, self._mm_inner = self._build_scroll(mframe)
+
+    def _build_scroll(self, f):
+        c = tk.Canvas(f, background=self.theme["input_bg"], height=320)
+        s = ttk.Scrollbar(f, orient="vertical", command=c.yview)
+        inner = ttk.Frame(c)
+        inner.bind("<Configure>", lambda e, c=c: c.configure(scrollregion=c.bbox("all")))
+        c.create_window((0, 0), window=inner, anchor="nw")
+        c.configure(yscrollcommand=s.set)
+        c.pack(side="left", fill="both", expand=True, padx=0, pady=0)
+        s.pack(side="right", fill="y")
+        self._bind_social_canvas_wheel(c)
+        return c, inner
+
+    def _blocks_start_refresh(self):
+        if not self.client:
+            self.init_client()
+        if not self.client:
+            messagebox.showerror("Error", "Set credentials in Tab 2 (Authorization) first.")
+            return
+        self.blocks_status.set("Loading…")
+        threading.Thread(target=self._thread_fetch_blocks, daemon=True).start()
+
+    def _thread_fetch_blocks(self):
+        try:
+            b = self._paginate_user_list_simple(self.client.get_blocked)
+            time.sleep(0.8)
+            m = self._paginate_user_list_simple(self.client.get_muted)
+            for x in b + m:
+                x["selected"] = False
+
+            def ap():
+                self.blocked_list = b
+                self.muted_list = m
+                self.blocks_status.set(f"Blocked: {len(b)} | Muted: {len(m)}")
+                self._refresh_block_panels()
+
+            self.root.after(0, ap)
+        except Exception as e:
+
+            def emsg():
+                self.blocks_status.set(str(e))
+                if "403" in str(e) or "Not authorized" in str(e).lower() or "Forbidden" in str(e):
+                    messagebox.showerror("Blocks / mutes", str(e) + "\n(Your X API tier or app may not allow this.)")
+                else:
+                    messagebox.showerror("Blocks / mutes", str(e))
+
+            self.root.after(0, emsg)
+
+    def _paginate_user_list_simple(self, method):
+        out = []
+        token = None
+        while True:
+            resp = method(
+                max_results=1000,
+                user_fields=["username", "name"],
+                pagination_token=token,
+                user_auth=True,
+            )
+            if resp and resp.data:
+                for u in resp.data:
+                    out.append(
+                        {
+                            "id": str(u.id),
+                            "username": (u.username or "")[:80],
+                            "name": (getattr(u, "name", None) or "")[:80],
+                            "selected": False,
+                        }
+                    )
+            meta = resp.meta or {}
+            token = meta.get("next_token") if isinstance(meta, dict) else getattr(meta, "next_token", None)
+            if not token:
+                break
+            time.sleep(1.0)
+        return out
+
+    def _refresh_block_panels(self):
+        self._fill_block_list(self._bb_inner, self.blocked_list, True)
+        self._fill_block_list(self._mm_inner, self.muted_list, False)
+        self._bb_canvas.configure(scrollregion=self._bb_canvas.bbox("all"))
+        self._mm_canvas.configure(scrollregion=self._mm_canvas.bbox("all"))
+
+    def _fill_block_list(self, inner, users, is_block):
+        for w in inner.winfo_children():
+            w.destroy()
+        for u in users:
+            u.setdefault("selected", False)
+            r = ttk.Frame(inner, padding=2)
+            r.pack(fill="x")
+            bvar = tk.BooleanVar(value=u.get("selected", False))
+
+            def on_cb(b=bvar, uu=u):
+                uu["selected"] = b.get()
+
+            ttk.Checkbutton(
+                r,
+                variable=bvar,
+                command=on_cb,
+            ).pack(side="left", padx=2)
+            ttk.Label(
+                r,
+                text=f"@{u.get('username', '?')}  {u.get('name', '')[:50]}",
+                width=50,
+                anchor="w",
+            ).pack(side="left", fill="x", expand=True, padx=2)
+            if is_block:
+                ttk.Button(r, text="Unblock", width=8, command=lambda uu=dict(u): self._unblock_one(uu)).pack(side="right", padx=2)
+            else:
+                ttk.Button(r, text="Unmute", width=8, command=lambda uu=dict(u): self._unmute_one(uu)).pack(side="right", padx=2)
+
+    def _blocks_select(self, is_block, v):
+        lst = self.blocked_list if is_block else self.muted_list
+        for u in lst:
+            u["selected"] = v
+        self._refresh_block_panels()
+
+    def _blocks_get_selected(self, is_block):
+        return [u for u in (self.blocked_list if is_block else self.muted_list) if u.get("selected")]
+
+    def _blocks_bulk_un(self, is_block):
+        sel = self._blocks_get_selected(is_block)
+        if not sel:
+            messagebox.showinfo("Info", "Nothing selected.")
+            return
+        w = "Unblock" if is_block else "Unmute"
+        if not messagebox.askyesno("Confirm", f"{w} {len(sel)} user(s)?"):
+            return
+        if is_block:
+            threading.Thread(target=self._thread_unblock, args=(sel,), daemon=True).start()
+        else:
+            threading.Thread(target=self._thread_unmute, args=(sel,), daemon=True).start()
+
+    def _unblock_one(self, u):
+        threading.Thread(target=self._thread_unblock, args=([u],), daemon=True).start()
+
+    def _unmute_one(self, u):
+        threading.Thread(target=self._thread_unmute, args=([u],), daemon=True).start()
+
+    def _thread_unblock(self, users):
+        for u in users:
+            try:
+                self.client.unblock(u["id"])
+                self.blocked_list = [x for x in self.blocked_list if x["id"] != u["id"]]
+            except Exception as e:
+                msg = str(e)
+
+                def _show_unblock_err(m=msg):
+                    messagebox.showerror("Unblock", m)
+
+                self.root.after(0, _show_unblock_err)
+            time.sleep(0.5)
+        self.root.after(0, self._refresh_block_panels)
+        self.root.after(0, lambda: self.blocks_status.set("Updated blocked list."))
+
+    def _thread_unmute(self, users):
+        for u in users:
+            try:
+                self.client.unmute(u["id"])
+                self.muted_list = [x for x in self.muted_list if x["id"] != u["id"]]
+            except Exception as e:
+                msg = str(e)
+
+                def _show_unmute_err(m=msg):
+                    messagebox.showerror("Unmute", m)
+
+                self.root.after(0, _show_unmute_err)
+            time.sleep(0.5)
+        self.root.after(0, self._refresh_block_panels)
+        self.root.after(0, lambda: self.blocks_status.set("Updated muted list."))
+
+    # ====================== ANALYTICS (offline) ======================
+    def setup_analytics_tab(self, parent):
+        info = ttk.LabelFrame(parent, text="Data stays on this computer (no cloud upload).", padding=6)
+        info.pack(fill="x", padx=4, pady=4)
+        ttk.Label(
+            info,
+            text="(1) tweets.js — any user (X data archive)   |   (2)(3) Premium: overview + content analytics CSVs.",
+        ).pack(anchor="w")
+
+        row1 = ttk.Frame(parent)
+        row1.pack(fill="x", padx=4, pady=2)
+        ttk.Label(row1, text="tweets.js (archive)", width=20).pack(side="left")
+        ttk.Entry(row1, textvariable=self.analytics_tweets_path, width=60).pack(side="left", fill="x", expand=True, padx=4)
+        ttk.Button(row1, text="Browse…", command=self._pick_tweets_js).pack(side="right")
+
+        row2 = ttk.Frame(parent)
+        row2.pack(fill="x", padx=4, pady=2)
+        ttk.Label(row2, text="Analytics overview CSV (Premium)", width=20).pack(side="left")
+        ttk.Entry(row2, textvariable=self.analytics_overview_path, width=60).pack(side="left", fill="x", expand=True, padx=4)
+        ttk.Button(row2, text="Browse…", command=self._pick_overview_csv).pack(side="right")
+
+        row3 = ttk.Frame(parent)
+        row3.pack(fill="x", padx=4, pady=2)
+        ttk.Label(row3, text="Content CSV (Premium)", width=20).pack(side="left")
+        ttk.Entry(row3, textvariable=self.analytics_content_path, width=60).pack(side="left", fill="x", expand=True, padx=4)
+        ttk.Button(row3, text="Browse…", command=self._pick_content_csv).pack(side="right")
+
+        ttk.Button(parent, text="Load and build dashboard", command=self._analytics_start_load).pack(pady=6)
+        ttk.Label(parent, textvariable=self.analytics_status, style="Status.TLabel", wraplength=800).pack(pady=2)
+
+        outer = ttk.Frame(parent)
+        outer.pack(fill="both", expand=True, padx=2, pady=4)
+        vsb = ttk.Scrollbar(outer, orient="vertical")
+        cvs = tk.Canvas(outer, background=self.theme["input_bg"])
+        cvs.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        fr = ttk.Frame(cvs)
+        win = cvs.create_window((0, 0), window=fr, anchor="nw", tags="f")
+
+        def on_cfg(_=None):
+            cvs.itemconfigure("f", width=cvs.winfo_width() - 4)
+            cvs.configure(scrollregion=cvs.bbox("all"))
+
+        fr.bind("<Configure>", on_cfg)
+        cvs.bind("<Configure>", on_cfg)
+        cvs.configure(yscrollcommand=vsb.set)
+        vsb.configure(command=cvs.yview)
+        self._bind_social_canvas_wheel(cvs)
+        self._analytics_chart_parent = fr
+        ttk.Label(fr, text="(Charts load here after you pick files and click the button above.)", style="Muted.TLabel").pack(pady=20, anchor="w", padx=4)
+
+    def _pick_tweets_js(self):
+        p = filedialog.askopenfilename(
+            filetypes=[("tweets.js", "*.js"), ("All", "*.*")]
+        )
+        if p:
+            self.analytics_tweets_path.set(p)
+
+    def _pick_overview_csv(self):
+        p = filedialog.askopenfilename(filetypes=[("CSV", "*.csv"), ("All", "*.*")])
+        if p:
+            self.analytics_overview_path.set(p)
+
+    def _pick_content_csv(self):
+        p = filedialog.askopenfilename(filetypes=[("CSV", "*.csv"), ("All", "*.*")])
+        if p:
+            self.analytics_content_path.set(p)
+
+    def _clear_analytics_figures(self):
+        for fig in self._analytics_figures:
+            plt.close(fig)
+        self._analytics_figures = []
+        if self._analytics_chart_parent is None:
+            return
+        for w in self._analytics_chart_parent.winfo_children():
+            w.destroy()
+
+    def _analytics_start_load(self):
+        ptw = self.analytics_tweets_path.get().strip()
+        pov = self.analytics_overview_path.get().strip()
+        pco = self.analytics_content_path.get().strip()
+        if not ptw and not pov and not pco:
+            messagebox.showwarning("Files", "Select at least one file.")
+            return
+        self.analytics_status.set("Loading… (may use a lot of memory for large archives)")
+        threading.Thread(
+            target=self._thread_analytics_load, args=(ptw, pov, pco), daemon=True
+        ).start()
+
+    def _thread_analytics_load(self, ptw, pov, pco):
+        err = None
+        tw, ov, co = [], [], []
+        try:
+            if ptw:
+                tw = xeraser_analytics.parse_tweets_js(ptw)
+            if pov:
+                ov = xeraser_analytics.parse_overview_csv(pov)
+            if pco:
+                co = xeraser_analytics.parse_content_csv(pco)
+        except Exception as e:
+            err = e
+
+        def on_main():
+            if err is not None:
+                self.analytics_status.set("Error: " + str(err))
+                messagebox.showerror("Parse error", str(err))
+                return
+            self.parsed_tweets, self.parsed_overview, self.parsed_content = tw, ov, co
+            self._clear_analytics_figures()
+            nmsg = f"tweets: {len(tw)}  |  overview days: {len(ov)}  |  content rows: {len(co)}"
+            self.analytics_status.set("OK — " + nmsg)
+            self._build_analytics_charts()
+
+        self.root.after(0, on_main)
+
+    def _build_analytics_charts(self):
+        if self._analytics_chart_parent is None:
+            return
+        for w in self._analytics_chart_parent.winfo_children():
+            w.destroy()
+        tw, ov, co = self.parsed_tweets, self.parsed_overview, self.parsed_content
+
+        if tw:
+            rt = sum(1 for t in tw if t.get("is_retweet"))
+            rp = sum(1 for t in tw if t.get("is_reply") and not t.get("is_retweet"))
+            og = max(0, len(tw) - rt - rp)
+            ttk.Label(
+                self._analytics_chart_parent,
+                text=f"Archive: {len(tw)} items — retweets/RT-like: {rt} | replies: {rp} | other: {og}",
+            ).pack(anchor="w", pady=4, padx=4)
+            months = xeraser_analytics.tweets_activity_by_month(tw)
+            if months:
+                self._add_fig_bar(
+                    "Tweets in archive (by month)",
+                    [a[0] for a in months],
+                    [a[1] for a in months],
+                )
+            sources = xeraser_analytics.tweets_source_stats(tw)[:10]
+            if sources:
+                self._add_fig_hbar(
+                    "Top X clients in archive (tweet source)", [s[1] for s in sources], [s[0] for s in sources]
+                )
+
+        if ov:
+            imps = [d["impressions"] for d in ov]
+            eng = [d["engagements"] for d in ov]
+            follows = [d.get("new_follows", 0) for d in ov]
+            unf = [d.get("unfollows", 0) for d in ov]
+            n = range(len(ov))
+            fig1 = Figure(figsize=(7.2, 3.2), dpi=100)
+            a1 = fig1.add_subplot(2, 1, 1)
+            a2 = fig1.add_subplot(2, 1, 2)
+            a1.plot(n, imps, color="#1a73e8", label="Impressions")
+            a1.set_ylabel("Impr.")
+            a1.set_title("Overview: impressions (Premium)")
+            a1.grid(True, alpha=0.3)
+            a2.plot(n, eng, color="#e8710a", label="Engagements")
+            a2.set_ylabel("Eng.")
+            a2.set_xlabel("day index (chronological)")
+            a2.grid(True, alpha=0.3)
+            self._embed_fig(fig1, self._analytics_chart_parent)
+
+            fig2 = Figure(figsize=(7.2, 2.6), dpi=100)
+            ax2 = fig2.add_subplot(1, 1, 1)
+            ax2.fill_between(n, follows, color="#0d904f", alpha=0.4, label="new follows")
+            uneg = [-(u or 0) for u in unf]
+            ax2.fill_between(n, 0, uneg, color="#b00020", alpha=0.3, label="unfollows (as negative area)")
+            ax2.set_xlabel("day index")
+            ax2.legend(loc="upper right", fontsize=8)
+            fig2.suptitle("New follows and unfollows (Premium overview)")
+            self._embed_fig(fig2, self._analytics_chart_parent)
+
+        if co:
+            co_sorted = sorted(co, key=lambda p: p.get("impressions", 0), reverse=True)[:15]
+            y_labels = [p.get("text", p["post_id"])[:32] for p in co_sorted]
+            vals = [p.get("impressions", 0) for p in co_sorted]
+            if vals:
+                self._add_fig_hbar("Top posts by impressions (Premium content export)", vals, y_labels, figsize_h=6)
+
+    def _embed_fig(self, fig, parent):
+        self._analytics_figures.append(fig)
+        try:
+            fig.tight_layout()
+        except Exception:
+            pass
+        c = FigureCanvasTkAgg(fig, master=parent)
+        c.draw()
+        w = c.get_tk_widget()
+        w.pack(fill="both", expand=True, padx=2, pady=6)
+        ttk.Separator(parent, orient="horizontal").pack(fill="x", pady=4)
+        return c
+
+    def _add_fig_bar(self, title, labels, values):
+        fig = Figure(figsize=(7.2, 2.8), dpi=100)
+        ax = fig.add_subplot(1, 1, 1)
+        ax.bar(range(len(values)), values, color="#5a8fc7")
+        ax.set_title(title)
+        ax.set_xticks(range(len(labels)))
+        ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=7)
+        self._embed_fig(fig, self._analytics_chart_parent)
+
+    def _add_fig_hbar(self, title, values, labels, figsize_h=3.0):
+        fig = Figure(figsize=(7.2, figsize_h), dpi=100)
+        ax = fig.add_subplot(1, 1, 1)
+        ypos = range(len(values))
+        ax.barh(list(ypos), list(values), color="#7b68b3")
+        ax.set_yticks(list(ypos))
+        ax.set_yticklabels([str(l) for l in labels], fontsize=6)
+        ax.set_title(title)
+        self._embed_fig(fig, self._analytics_chart_parent)
 
 if __name__ == "__main__":
     print("Starting PleaseDaddyElonNotTheBelt.py")
