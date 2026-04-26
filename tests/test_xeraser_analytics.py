@@ -1,12 +1,23 @@
 """Unit tests for offline analytics parsers (no GUI, no network)."""
-import sys
 import textwrap
-from pathlib import Path
-
-# Repo root (parent of tests/) on path for `import xeraser_analytics`
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import xeraser_analytics
+
+
+def test_parse_tweets_js_prefix_before_array(tmp_path):
+    """Comment or other text before the JSON array is found via find('[')."""
+    js = textwrap.dedent(
+        r"""
+        window.YTD.tweets.part0 = /* not JSON yet */ [ {
+        "tweet" : { "id_str" : "1", "created_at" :
+        "Mon Apr 15 10:00:00 +0000 2024", "full_text" : "p", "source" : "x" } } ];
+        """
+    )
+    p = tmp_path / "tweets.js"
+    p.write_text(js, encoding="utf-8")
+    out = xeraser_analytics.parse_tweets_js(str(p))
+    assert len(out) == 1
+    assert out[0]["id_str"] == "1"
 
 
 def test_parse_tweets_js_minimal(tmp_path):
