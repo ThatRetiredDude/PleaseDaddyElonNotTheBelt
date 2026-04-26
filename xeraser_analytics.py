@@ -1,4 +1,5 @@
 """Local parsers for X archive and Premium analytics exports (no network)."""
+
 import csv
 import json
 import re
@@ -42,9 +43,7 @@ def parse_tweets_js(path: str):
             continue
         created = t.get("created_at")
         is_ret = bool(t.get("retweeted", False)) or t.get("retweeted_status") is not None
-        is_repl = bool(
-            t.get("in_reply_to_status_id") or t.get("in_reply_to_status_id_str")
-        )
+        is_repl = bool(t.get("in_reply_to_status_id") or t.get("in_reply_to_status_id_str"))
         body = t.get("full_text") or t.get("text") or ""
         src = t.get("source") or ""
         out.append(
@@ -85,12 +84,14 @@ def parse_overview_csv(path: str):
             dt = _parse_overview_date(row.get("Date", ""))
             if not dt:
                 continue
+
             def num(k):
                 try:
                     v = (row.get(k) or "0").replace(",", "").strip()
                     return int(v or 0)
                 except (ValueError, TypeError):
                     return 0
+
             rows.append(
                 {
                     "date": dt,
@@ -125,6 +126,7 @@ def parse_content_csv(path: str):
             pid = (row.get(need) or row.get("Post id") or "").strip()
             if not pid or not str(pid).isdigit():
                 continue
+
             def num(*keys):
                 for k in keys:
                     if k in row and row.get(k) not in (None, ""):
@@ -137,6 +139,7 @@ def parse_content_csv(path: str):
                         except (ValueError, TypeError):
                             pass
                 return 0
+
             out.append(
                 {
                     "post_id": str(pid),
@@ -177,6 +180,7 @@ def tweets_source_stats(tweets):
             return m.group(1).strip()
         s = re.sub(r"<[^>]+>", " ", html or "")
         return (s.strip() or "Unknown")[:80]
+
     c = Counter()
     for t in tweets:
         c[strip_src(t.get("source", ""))] += 1

@@ -1,4 +1,5 @@
 """Unit tests for offline analytics parsers (no GUI, no network)."""
+
 import textwrap
 
 import xeraser_analytics

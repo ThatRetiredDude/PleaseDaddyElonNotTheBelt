@@ -9,7 +9,7 @@ Desktop app to manage your own X (Twitter) data using **your** [developer](https
 | Tab | Purpose |
 |-----|--------|
 | 1. Instructions | How to get API keys and a tab overview |
-| 2. Authorization | X API keys, **Test User Auth / Test Bearer**; optional **AI** (model, OpenAI-compatible endpoint, token) for **Tab 4** only — not used to download posts |
+| 2. Authorization | X API keys; **Store in OS keychain** (default when available) or plain `x_credentials.json`. **Test User Auth / Test Bearer**; optional **AI** (model, endpoint, token) for **Tab 4** only — not used to download posts |
 | 3. My posts & replies | **Fetch Newer** / **Fetch Older** (X API), import archive, search, filters, queue for deletion, **Show → Flagged in last ToS review** after a ToS run |
 | 4. ToS review | AI batch review: flags posts that *might* break X rules. Heuristic (not legal advice). Invalid model JSON is retried with a stricter prompt; last flagged ids and summary are saved to `tos_last_run.json` (intersected with your loaded tweets on next launch) |
 | 5. Deletion queue | Delete queued posts in bulk |
@@ -22,7 +22,7 @@ Desktop app to manage your own X (Twitter) data using **your** [developer](https
 ## Requirements
 
 - **Python 3.8+**
-- **Dependencies** (see [requirements.txt](requirements.txt)): `tweepy`, `matplotlib`
+- **Dependencies** (see [requirements.txt](requirements.txt)): `tweepy`, `matplotlib`, `keyring` (saves X + AI creds in the system keychain when the checkbox in Tab 2 is on; falls back to JSON)
 - **tkinter** — usually bundled; on Linux install the system `python3-tk` / `tk` package
 - X API **Basic** tier is often required to **list** your tweets; free tier can still support delete flows depending on X policy
 
@@ -54,12 +54,20 @@ Or, with your venv activated:
 
 ```bash
 python3 PleaseDaddyElonNotTheBelt.py
+# or, same behavior:
+python3 -m pde
 ```
+
+## Project layout
+
+- **[PleaseDaddyElonNotTheBelt.py](PleaseDaddyElonNotTheBelt.py)** — small launcher: dependency check, then `pde.app.main()`.
+- **`pde/`** — `app.py` (main window), [paths](pde/paths.py), [constants/AI model lists](pde/constants.py), [ToS batching](pde/ai_batching.py), [dependency check](pde/deps.py), [keyring + file credentials](pde/secure_creds.py).
+- **[xeraser_analytics.py](xeraser_analytics.py)** — offline `tweets.js` and Premium CSV parsers (Tab 10).
 
 ## Security and local files
 
-- **[x_credentials.json](PleaseDaddyElonNotTheBelt.py)** (next to the script) stores API keys in **plain JSON** on disk. It is **gitignored**; keep backups private and do not commit it.
-- Other local, gitignored data: [my_tweets.json](PleaseDaddyElonNotTheBelt.py), [deleted_history.json](PleaseDaddyElonNotTheBelt.py), [ai_requests.log](PleaseDaddyElonNotTheBelt.py) (AI debug, no tokens in logs by design), **tos_last_run.json** (last ToS flagged ids + summary), `follows_cache.json` if present. Treat as sensitive; use tight file permissions on your user account. Built-in keychain/encryption is not included.
+- **Credentials (Tab 2):** with **Store in OS keychain** (recommended), secrets are written via [keyring](https://github.com/jaraco/keyring) to the system store (e.g. macOS Keychain, Windows Credential Manager, Freedesktop Secret Service). If keychain is off or unavailable, **x_credentials.json** in the repo root holds the same fields in **plain JSON**; it is **gitignored**. The app tries keychain first on load, then the file.
+- **Other** local, gitignored data: `my_tweets.json`, `deleted_history.json`, [ai_requests.log](pde/app.py) (AI request debug, no tokens in logs by design), **tos_last_run.json** (ToS run summary and ids), `follows_cache.json` if present. Keep copies private and use tight file permissions. Keychain is not a substitute for a locked full-disk backup policy.
 
 ## Fetch vs delete
 
@@ -68,12 +76,15 @@ python3 PleaseDaddyElonNotTheBelt.py
 
 ## Development
 
-- **Unit tests** (offline parsers only, no GUI): with the venv active, `pip install -r requirements-dev.txt` then `pytest tests/ -q` (or `python -m pytest tests/ -q`). Config: [pyproject.toml](pyproject.toml). Tests live under [tests/](tests/).
-- **CI:** [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs those tests on push and pull requests (Python 3.10, 3.12, 3.13, Ubuntu). No API keys are required in CI.
-- **Dependabot** ([`.github/dependabot.yml`](.github/dependabot.yml)) proposes monthly updates for pip and GitHub Actions.
-- [xeraser_analytics.py](xeraser_analytics.py) holds archive/CSV parsing for Tab 10; the main UI is in [PleaseDaddyElonNotTheBelt.py](PleaseDaddyElonNotTheBelt.py) (single file by design; modular split is optional future work).
-- **Optional native packaging** (PyInstaller, etc.): see [scripts/packaging_notes.md](scripts/packaging_notes.md). Not required for normal use.
-- Design notes and implementation checklists: [docs/IMPROVEMENTS_SPEC.md](docs/IMPROVEMENTS_SPEC.md), [docs/TESTS_AND_PATCHES.md](docs/TESTS_AND_PATCHES.md).
+- **Install dev tools** (with the venv active): `pip install -r requirements-dev.txt`.
+- **Tests** — [pyproject.toml](pyproject.toml) sets `testpaths` and `pythonpath`. `pytest tests/ -q` runs:
+  - offline [xeraser_analytics](xeraser_analytics.py) parser tests, and
+  - a [headless Tk smoke test](tests/test_tk_headless.py) (constructs the main window with no event loop; CI uses [Xvfb](https://en.wikipedia.org/wiki/Xvfb) on Ubuntu).
+- **Ruff** (`ruff check` / `ruff format`) and **Mypy** (typed modules under `pde/`, the launcher, and `xeraser_analytics.py`; the large [pde/app.py](pde/app.py) UI is excluded from Ruff in config and Mypy-overridden). `pre-commit install` uses [.pre-commit-config.yaml](.pre-commit-config.yaml).
+- **CI** ([.github/workflows/ci.yml](.github/workflows/ci.yml)): Ruff, Mypy, then pytest under `xvfb-run` (Python 3.10, 3.12, 3.13, Ubuntu). No API keys.
+- **Dependabot** ([.github/dependabot.yml](.github/dependabot.yml)) proposes monthly updates for pip and GitHub Actions.
+- **Optional native packaging** (PyInstaller, etc.): [scripts/packaging_notes.md](scripts/packaging_notes.md). Not required for normal use.
+- Design notes: [docs/IMPROVEMENTS_SPEC.md](docs/IMPROVEMENTS_SPEC.md), [docs/TESTS_AND_PATCHES.md](docs/TESTS_AND_PATCHES.md) (some paths may be historical).
 
 ## License
 

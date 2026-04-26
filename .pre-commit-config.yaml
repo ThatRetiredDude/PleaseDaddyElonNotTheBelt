@@ -1,0 +1,11 @@
+# See https://pre-commit.com
+# Run `mypy` in CI and locally: `mypy --config pyproject.toml .` (pde.app excluded in pyproject).
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.9.9
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+        exclude: ^pde/app\.py$
+      - id: ruff-format
+        exclude: ^pde/app\.py$
