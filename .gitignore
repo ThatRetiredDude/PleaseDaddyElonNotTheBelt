@@ -10,6 +10,11 @@ deleted_history.json
 *.tmp
 *.tmp.json
 ai_requests.log
+tos_last_run.json
+follows_cache.json
+
+# Local X archive / analytics fixtures (not for git)
+SampleFiles/
 
 # Python
 .venv/

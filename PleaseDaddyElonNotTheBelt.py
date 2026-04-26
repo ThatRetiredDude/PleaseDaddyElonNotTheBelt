@@ -10,7 +10,7 @@ import threading
 import re
 import unicodedata
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 import urllib.error
@@ -122,6 +122,7 @@ import matplotlib.pyplot as plt
 CREDENTIALS_FILE = os.path.join(BASE_DIR, "x_credentials.json")
 TWEETS_FILE = os.path.join(BASE_DIR, "my_tweets.json")
 HISTORY_FILE = os.path.join(BASE_DIR, "deleted_history.json")
+TOS_LAST_RUN_FILE = os.path.join(BASE_DIR, "tos_last_run.json")
 CHUNK_SIZE = 80
 AI_ENDPOINT_DEFAULT = "https://api.x.ai/v1"
 AI_REQUEST_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -451,6 +452,7 @@ class XBulkDeleter:
         self.create_tabs()
         self.load_credentials()
         self.load_tweets()
+        self._load_tos_last_run()
         self.load_history()
         self.refresh_tweets_list()
         self.update_delete_preview()
@@ -889,6 +891,15 @@ Tab overview:
             ),
             style="Muted.TLabel",
             wraplength=750
+        ).pack(anchor="w", padx=30, pady=(0, 6))
+        ttk.Label(
+            parent,
+            text=(
+                "This is a heuristic screen, not legal advice. You may get false positives or false negatives. "
+                "Always check X’s official rules and your own judgment."
+            ),
+            style="Muted.TLabel",
+            wraplength=750
         ).pack(anchor="w", padx=30, pady=(0, 10))
 
         ttk.Label(parent, text="1. Choose which tweets to scan", font=("Arial", 11, "bold"), style="Title.TLabel").pack(anchor="w", padx=30, pady=(6, 0))
@@ -1029,6 +1040,10 @@ Tab overview:
         "{\"flagged\":[{\"id\":\"<same id string as input>\",\"level\":\"low|medium|high\",\"reason\":\"brief\"}]}. "
         "Omit posts that are clearly fine. If none, return {\"flagged\":[]}. Use the exact id strings from the user message."
     )
+    _TOS_JSON_REPAIR = (
+        "Return a single JSON object, nothing else, no markdown fences. "
+        'Shape: {"flagged":[{"id":"string","level":"low|medium|high","reason":"brief"}]}. Use only ids from the user message.'
+    )
 
     def _start_ai_scrub(self):
         extra = (self.ai_scrub_prompt_text.get("1.0", tk.END) or "").strip()
@@ -1058,6 +1073,7 @@ Tab overview:
                 batches = list(build_ai_batches(tweets, model))
                 total = len(batches)
                 acc = set()
+                unparseable = 0
                 processed = 0
                 for i, batch in enumerate(batches):
                     if not self._ai_scrub_running:
@@ -1084,10 +1100,27 @@ Tab overview:
                         self.root.after(0, self._ai_scrub_clear_results_on_error)
                         return
                     ids = self._parse_tos_ids_from_response(text) if text else set()
-                    if ids is not None:
-                        acc |= ids
+                    if ids is None and text:
+                        try:
+                            text2 = self._call_ai_chat(
+                                endpoint,
+                                model,
+                                token,
+                                self._TOS_JSON_REPAIR,
+                                user_prompt
+                                + "\n\nThe previous model reply was not valid JSON. Return only the JSON object, no other text.",
+                                max_tokens=2048,
+                                timeout_sec=60,
+                            )
+                        except Exception:
+                            text2 = None
+                        ids = self._parse_tos_ids_from_response(text2) if text2 else set()
+                    if ids is None:
+                        unparseable += 1
+                        ids = set()
+                    acc |= ids
                     processed += len(batch)
-                self.root.after(0, lambda acc=set(acc), tr=len(tweets): self._on_tos_done(acc, tr))
+                self.root.after(0, lambda acc=set(acc), tr=len(tweets), up=unparseable: self._on_tos_done(acc, tr, up))
             except Exception as e:
                 self.root.after(0, lambda err=self._sanitize_for_display(str(e)): messagebox.showerror("ToS review", err))
                 self.root.after(0, lambda: self.ai_scrub_progress_var.set("Error."))
@@ -1105,15 +1138,18 @@ Tab overview:
         self.ai_scrub_result_var.set("0 flagged in last run.")
         self.ai_scrub_progress_var.set("Error.")
 
-    def _on_tos_done(self, flagged_ids, total_rows):
+    def _on_tos_done(self, flagged_ids, total_rows, unparseable_batches=0):
         """Main thread: apply ToS result filter on Posts tab."""
         self._tos_flagged_ids = {str(x) for x in flagged_ids}
         valid = {str(t.get("id")) for t in self.tweets if t.get("id")}
         self._tos_flagged_ids &= valid
         n = len(self._tos_flagged_ids)
-        self.ai_scrub_compiled_var.set(
+        summary = (
             f"Model returned {n} id(s) matching your loaded posts (out of {total_rows} reviewed)."
         )
+        if unparseable_batches:
+            summary += f" Batches with JSON still unparseable after repair: {unparseable_batches}."
+        self.ai_scrub_compiled_var.set(summary)
         self.ai_scrub_result_var.set(
             f"Flagged: {n} post(s). Tab 3 → Show → \"Flagged in last ToS review\" to filter the list."
         )
@@ -1129,6 +1165,50 @@ Tab overview:
         self.ai_scrub_apply_btn.config(state="normal")
         self.ai_scrub_add_queue_btn.config(state="normal" if n else "disabled")
         self.ai_scrub_cancel_btn.config(state="disabled")
+        self._save_tos_last_run(n, total_rows, summary)
+
+    def _save_tos_last_run(self, n_flagged, total_rows, summary_text):
+        try:
+            payload = {
+                "ids": list(self._tos_flagged_ids),
+                "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "summary": summary_text,
+                "total_rows": int(total_rows),
+            }
+            with open(TOS_LAST_RUN_FILE, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+        except OSError:
+            pass
+
+    def _load_tos_last_run(self):
+        if not os.path.exists(TOS_LAST_RUN_FILE):
+            return
+        try:
+            with open(TOS_LAST_RUN_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError, TypeError):
+            return
+        raw_ids = data.get("ids") or data.get("flagged_ids")
+        if not isinstance(raw_ids, list):
+            return
+        valid = {str(t.get("id")) for t in self.tweets if t.get("id")}
+        self._tos_flagged_ids = {str(x) for x in raw_ids if str(x) in valid}
+        n = len(self._tos_flagged_ids)
+        if not hasattr(self, "ai_scrub_compiled_var"):
+            return
+        if n > 0:
+            self.ai_scrub_compiled_var.set(
+                data.get("summary")
+                or f"Restored {n} flagged id(s) from last save ({data.get('at', '')})."
+            )
+            self.ai_scrub_result_var.set(
+                f"Use Tab 3 → Show → \"Flagged in last ToS review\" to see {n} post(s) still in your cache."
+            )
+        elif raw_ids and not n:
+            self.ai_scrub_compiled_var.set(
+                "Previous ToS file listed ids, but none match your current loaded tweets. Run ToS again or reload posts."
+            )
+            self.ai_scrub_result_var.set("")
 
     def _ai_scrub_apply_search(self):
         if not self._tos_flagged_ids:
@@ -2710,9 +2790,13 @@ Tab overview:
             if not me or not me.data:
                 raise RuntimeError("get_me() returned no user")
             uid = str(me.data.id)
-            following = self._paginate_user_list(self.client.get_users_following, uid)
+            following = self._paginate_user_list(
+                self.client.get_users_following, uid, progress_label="following"
+            )
             time.sleep(1.0)
-            followers = self._paginate_user_list(self.client.get_users_followers, uid)
+            followers = self._paginate_user_list(
+                self.client.get_users_followers, uid, progress_label="followers"
+            )
             for u in following + followers:
                 u["selected"] = False
             def apply():
@@ -2733,10 +2817,16 @@ Tab overview:
 
             self.root.after(0, errbox)
 
-    def _paginate_user_list(self, method, user_id):
+    def _paginate_user_list(self, method, user_id, progress_label=None):
         out = []
         token = None
+        page = 0
         while True:
+            page += 1
+            if progress_label is not None:
+                n = len(out)
+                st = f"Loading {progress_label}: {n} account(s) so far (page {page})…"
+                self.root.after(0, lambda s=st: self.follows_status.set(s))
             resp = method(
                 int(user_id),
                 max_results=1000,

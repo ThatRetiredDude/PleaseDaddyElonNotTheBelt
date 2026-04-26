@@ -1,68 +1,68 @@
-# PleaseDaddyElonNotTheBelt – X Bulk Deleter
+# PleaseDaddyElonNotTheBelt – X bulk deleter and account tools
 
-A desktop app to bulk delete your X (Twitter) posts, replies, and retweets. Uses the official X API with your own API keys.
+Desktop app to manage your own X (Twitter) data using **your** [developer](https://developer.x.com) keys: fetch posts, queue bulk deletes, review history, follow/unfriend, blocks/mutes, and **offline** analytics. Optional **AI** (Tab 4) is for **ToS review only**; loading posts always uses the **X API** or your archive import.
 
-## Features
+## Features (tabs)
 
-- **Instructions** – Step-by-step guide to get X API keys (Tab 1).
-- **Authorization** – Save and test X API credentials; optional **AI Reviewer** (endpoint, model, API token) for natural-language search in Posts & Replies. Token is stored locally and never logged.
-- **My Posts & Replies** – Fetch newer/older tweets, import archive, **AI Reviewer** (robot icon) to describe what you’re looking for and apply a suggested filter, and search/filter/sort for queueing.
-- **Deletion Queue** – Preview selected tweets and delete them in bulk (with rate-limit handling).
-- **Historical Deletions** – View a running tally and history of deleted tweets (stored locally). Per-row actions: **Trash** (remove from history), **Arrow** (open pre-filled compose on X), **Envelope** (edit & post from app).
-- **Compose** – Write and post new tweets in-app. Use the Envelope action on a history row to pre-fill from a deleted tweet.
+| Tab | Purpose |
+|-----|--------|
+| 1. Instructions | How to get API keys and a tab overview |
+| 2. Authorization | X API keys, **Test User Auth / Test Bearer**; optional **AI** (model, OpenAI-compatible endpoint, token) for **Tab 4** only — not used to download posts |
+| 3. My posts & replies | **Fetch Newer** / **Fetch Older** (X API), import archive, search, filters, queue for deletion, **Show → Flagged in last ToS review** after a ToS run |
+| 4. ToS review | AI batch review: flags posts that *might* break X rules. Heuristic (not legal advice). Invalid model JSON is retried with a stricter prompt; last flagged ids and summary are saved to `tos_last_run.json` (intersected with your loaded tweets on next launch) |
+| 5. Deletion queue | Delete queued posts in bulk |
+| 6. Historical deletions | Log of deletions, restore-to-compose actions |
+| 7. Compose | Post from the app |
+| 8. Follows | Following, followers, mutuals, follow/unfollow (X API; tier may apply). Refresh shows **per-page progress** while lists load |
+| 9. Blocks & mutes | List and actions where API allows |
+| 10. Analytics (offline) | `tweets.js` + optional Premium **overview** and **content** CSVs; data stays on your machine |
 
 ## Requirements
 
 - **Python 3.8+**
-- **tweepy** – X API client (`pip install tweepy`)
-- **tkinter** – GUI (usually included with Python; on Linux install `python3-tk`)
+- **Dependencies** (see [requirements.txt](requirements.txt)): `tweepy`, `matplotlib`
+- **tkinter** — usually bundled; on Linux install the system `python3-tk` / `tk` package
+- X API **Basic** tier is often required to **list** your tweets; free tier can still support delete flows depending on X policy
 
 ## Setup
 
-1. Clone or download this repo.
-2. Install dependencies:
-   ```bash
-   pip install tweepy
-   ```
-   On Linux, also install tkinter, e.g.:
-   ```bash
-   sudo apt install python3-tk   # Debian/Ubuntu
-   sudo dnf install python3-tkinter   # Fedora/RHEL
-   sudo pacman -S tk   # Arch
-   ```
-3. Get X API keys from [developer.x.com](https://developer.x.com):
-   - Create a project/app.
-   - Copy Consumer Key, Consumer Secret, Access Token, Access Token Secret.
-   - (Optional) Copy Bearer token for read-only fetch calls.
-   - Set app permissions to **Read + Write + Direct Messages**.
-   - **Basic tier** ($100/mo) is required to *fetch* tweet history; free tier can still *delete* tweets (but not list them in-app).
-
-## Usage
-
 ```bash
-python PleaseDaddyElonNotTheBelt.py
+cd path/to/PleaseDaddyElonNotTheBelt
+python3 -m venv .venv
+# Windows: .venv\Scripts\activate
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
-1. **Tab 1 – Instructions**: Step-by-step guide to get your X API keys.
-2. **Tab 2 – Authorization**: Enter your API credentials, click **Save Credentials**, then **Test User Auth (RW)**. Optionally set **AI Reviewer** (endpoint default: xAI, model dropdown, API token) and save; token is stored in the same local credentials file and is masked in the UI.
-3. **Tab 3 – My Posts & Replies**: **Robot icon** opens the AI Reviewer: type what you’re looking for (e.g. “tweets about the weather”), click **Send**; the AI returns a search suggestion and the app applies it to filter the list. Use **Fetch Newer** / **Fetch Older**, **Import Archive**, and Search/Filters to queue items for deletion.
-4. **Tab 4 – AI Scrub**: Batch-send loaded/imported tweets to an AI model and get one compiled search. **Apply search to Posts tab** filters Tab 3; **Queue all matched tweets** selects everything matched into Tab 5.
-5. **Tab 5 – Deletion Queue**: Review selected tweets, then **DELETE ALL QUEUED NOW** (with confirmation). Unqueue or delete in bulk; batches run in a bottom panel with Pause/Stop.
-6. **Tab 6 – Historical Deletions**: View tally and past deletions. Per row: **Trash** (remove from history), **Arrow** (open X intent with pre-filled text), **Envelope** (copy into Compose tab).
-7. **Tab 7 – Compose**: Write a tweet (280 chars), **Post** via API or **Clear**. Use **Envelope** on a history row to pre-fill.
+After the venv exists and dependencies are installed, you can also run from the repo root with [run.sh](run.sh) (Unix/macOS; it will prompt you to create `.venv` if missing, and can install `requirements.txt` if packages are missing).
 
-### Fetch vs Delete auth behavior
+```bash
+./run.sh
+```
 
-- Fetch uses a read client (Bearer token when available, otherwise user auth).
-- The app can retry once with the alternate read auth mode if fetch gets `401 Unauthorized`.
-- Delete always uses user-auth credentials (Access Token + Secret) and cannot run with bearer-only auth.
+Or:
 
-## Local Files
+```bash
+python3 PleaseDaddyElonNotTheBelt.py
+```
 
-- `x_credentials.json` – Your API credentials (plain text; keep private and out of version control).
-- `my_tweets.json` – Cached list of fetched tweets.
-- `deleted_history.json` – Record of deleted tweets for the history tab.
+## Security and local files
+
+- **[x_credentials.json](PleaseDaddyElonNotTheBelt.py)** (next to the script) stores API keys in **plain JSON** on disk. It is **gitignored**; keep backups private and do not commit it.
+- Other local, gitignored data: [my_tweets.json](PleaseDaddyElonNotTheBelt.py), [deleted_history.json](PleaseDaddyElonNotTheBelt.py), [ai_requests.log](PleaseDaddyElonNotTheBelt.py) (AI debug, no tokens in logs by design), **tos_last_run.json** (last ToS flagged ids + summary), `follows_cache.json` if present. Treat as sensitive; use tight file permissions on your user account. Built-in keychain/encryption is not included.
+
+## Fetch vs delete
+
+- Fetching timelines uses the read path (bearer and/or user auth) with Tweepy.
+- Deletes use **user auth** (access token + secret) only.
+
+## Development
+
+- **Unit tests** (offline parsers only, no GUI): with the venv active, `pip install -r requirements-dev.txt` then `pytest tests/ -q`. Config: [pyproject.toml](pyproject.toml). Tests live under [tests/](tests/).
+- [xeraser_analytics.py](xeraser_analytics.py) holds archive/CSV parsing for Tab 10; the main UI is in [PleaseDaddyElonNotTheBelt.py](PleaseDaddyElonNotTheBelt.py) (single file by design; modular split is optional future work).
+- **Optional native packaging** (PyInstaller, etc.): see [scripts/packaging_notes.md](scripts/packaging_notes.md). Not required for normal use.
+- Design notes and implementation checklists: [docs/IMPROVEMENTS_SPEC.md](docs/IMPROVEMENTS_SPEC.md), [docs/TESTS_AND_PATCHES.md](docs/TESTS_AND_PATCHES.md).
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md) for dependency attributions.
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md).
