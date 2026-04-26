@@ -9,8 +9,8 @@ Desktop app to manage your own X (Twitter) data using **your** [developer](https
 | Tab | Purpose |
 |-----|--------|
 | 1. Instructions | How to get API keys and a tab overview |
-| 2. Authorization | X API keys; **Store in OS keychain** (default when available) or plain `x_credentials.json`. **Test User Auth / Test Bearer**; optional **AI** (model, endpoint, token) for **Tab 4** only — not used to download posts |
-| 3. My posts & replies | **Fetch Newer** / **Fetch Older** (X API), import archive, search, filters, queue for deletion, **Show → Flagged in last ToS review** after a ToS run |
+| 2. Authorization | X API keys; **Store in OS keychain** (default when available) or plain `x_credentials.json`. **Copy redacted support** / **load JSON into keychain**; **Test User Auth / Test Bearer**; optional **AI** (model, endpoint, token) for **Tab 4** only — not used to download posts |
+| 3. My posts & replies | **Fetch Newer** / **Fetch Older** (X API) with a **line showing last rate-limit info** when the API returns it; import archive, search, filters, queue, **Show → Flagged in last ToS review** after a ToS run |
 | 4. ToS review | AI batch review: flags posts that *might* break X rules. Heuristic (not legal advice). Invalid model JSON is retried with a stricter prompt; last flagged ids and summary are saved to `tos_last_run.json` (intersected with your loaded tweets on next launch) |
 | 5. Deletion queue | Delete queued posts in bulk |
 | 6. Historical deletions | Log of deletions, restore-to-compose actions |
@@ -67,7 +67,8 @@ python3 -m pde
 ## Security and local files
 
 - **Credentials (Tab 2):** with **Store in OS keychain** (recommended), secrets are written via [keyring](https://github.com/jaraco/keyring) to the system store (e.g. macOS Keychain, Windows Credential Manager, Freedesktop Secret Service). If keychain is off or unavailable, **x_credentials.json** in the repo root holds the same fields in **plain JSON**; it is **gitignored**. The app tries keychain first on load, then the file.
-- **Other** local, gitignored data: `my_tweets.json`, `deleted_history.json`, [ai_requests.log](pde/app.py) (AI request debug, no tokens in logs by design), **tos_last_run.json** (ToS run summary and ids), `follows_cache.json` if present. Keep copies private and use tight file permissions. Keychain is not a substitute for a locked full-disk backup policy.
+- **Other** local, gitignored data: `my_tweets.json`, `deleted_history.json` (and optional rotating `*.bak` / `*.bak.*` next to them from atomic saves), [ai_requests.log](pde/app.py) (AI request debug, no tokens in logs by design), **tos_last_run.json** (ToS run summary and ids, also backed up on write), `follows_cache.json` if present. Keep copies private and use tight file permissions. Keychain is not a substitute for a locked full-disk backup policy.
+- **Help → About** shows the app version, data directory, Python/tweepy/keyring backend; Tab 2’s **redacted** copy is for your own local bug notes, not for posting real secrets.
 
 ## Fetch vs delete
 
@@ -81,7 +82,8 @@ python3 -m pde
   - offline [xeraser_analytics](xeraser_analytics.py) parser tests, and
   - a [headless Tk smoke test](tests/test_tk_headless.py) (constructs the main window with no event loop; CI uses [Xvfb](https://en.wikipedia.org/wiki/Xvfb) on Ubuntu).
 - **Ruff** (`ruff check` / `ruff format`) and **Mypy** (typed modules under `pde/`, the launcher, and `xeraser_analytics.py`; the large [pde/app.py](pde/app.py) UI is excluded from Ruff in config and Mypy-overridden). `pre-commit install` uses [.pre-commit-config.yaml](.pre-commit-config.yaml).
-- **CI** ([.github/workflows/ci.yml](.github/workflows/ci.yml)): Ruff, Mypy, then pytest under `xvfb-run` (Python 3.10, 3.12, 3.13, Ubuntu). No API keys.
+- **CI** ([.github/workflows/ci.yml](.github/workflows/ci.yml)): parallel **lint** (Python 3.12) and **test** (Python 3.10, 3.12, 3.13) jobs — Ruff, Mypy, then pytest under `xvfb-run` in the test job. No API keys. Duplicate runs for the same branch are cancelled (workflow concurrency).
+- **Layout / upgrades:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and a short [docs/TESTED_VERSIONS.md](docs/TESTED_VERSIONS.md) (informal; no full lock file).
 - **Dependabot** ([.github/dependabot.yml](.github/dependabot.yml)) proposes monthly updates for pip and GitHub Actions.
 - **Optional native packaging** (PyInstaller, etc.): [scripts/packaging_notes.md](scripts/packaging_notes.md). Not required for normal use.
 - Design notes: [docs/IMPROVEMENTS_SPEC.md](docs/IMPROVEMENTS_SPEC.md), [docs/TESTS_AND_PATCHES.md](docs/TESTS_AND_PATCHES.md) (some paths may be historical).

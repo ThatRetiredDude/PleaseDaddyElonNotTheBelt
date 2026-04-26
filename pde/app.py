@@ -28,8 +28,10 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 
-from pde import secure_creds
+import pde
+from pde import credutil, secure_creds, tweepy_extra
 from pde.ai_batching import build_ai_batches
+from pde.atomicio import atomic_write_json, read_json_file
 from pde.constants import (
     AI_ENDPOINT_DEFAULT,
     AI_MODEL_DEFAULT_ENDPOINT,
@@ -133,6 +135,9 @@ class XBulkDeleter:
         self.parsed_content = []
         self._analytics_chart_parent = None
         self._analytics_figures = []
+        self.api_fetch_status_var = tk.StringVar(
+            value="X API: (no request yet in this session). 401/403/429/500 and tier issues are shown in error dialogs when a call fails."
+        )
 
         self.setup_theme()
         self.create_tabs()
@@ -272,6 +277,7 @@ class XBulkDeleter:
         analytics_tab = ttk.Frame(self.notebook)
         self.notebook.add(analytics_tab, text="10. Analytics (offline)")
         self.setup_analytics_tab(analytics_tab)
+        self._setup_menubar()
 
     def setup_instructions_tab(self, parent):
         ttk.Label(parent, text="How to Get Your Keys (Step-by-Step)", font=("Arial", 14, "bold"), style="Title.TLabel").pack(pady=(20,10))
@@ -307,7 +313,14 @@ Tab overview:
 • Tab 7 – Compose: write and post tweets
 • Tab 8 – Follows: following/followers, mutual views, follow/unfollow
 • Tab 9 – Blocks & Mutes
-• Tab 10 – Analytics (offline): tweets.js and Premium CSVs, local only"""
+• Tab 10 – Analytics (offline): tweets.js and Premium CSVs, local only
+
+Troubleshooting (no network upload from this app; all data stays on disk here):
+• 401 Unauthorized: regenerate keys on developer.x.com, paste without extra spaces, re-save; user-auth vs bearer matters per endpoint.
+• 403 Forbidden: your app or account tier may not allow listing tweets or certain actions; check X’s current “Basic / Free” policy.
+• 429 Rate limit: the Tab 3 line shows last known rate header when the API returns it. Large deletes can hit limits; the batch flow pauses when the API throttles.
+• Linux + keychain: the “Store in OS keychain” option needs a working Secret Service (DBus session). Headless/SSH may fall back to x_credentials.json; use a normal desktop session for keychain or keep the JSON file and restrict permissions.
+• my_tweets.json, deleted_history.json, and tos data use rotating .bak saves so a crash is less likely to leave half-written JSON."""
         instr_text.insert("1.0", instructions)
         instr_text.config(state="disabled")
 
@@ -347,6 +360,15 @@ Tab overview:
         ttk.Button(btn_frame, text="💾 Save Credentials", command=self.save_credentials).pack(side="left", padx=8)
         ttk.Button(btn_frame, text="🔑 Test User Auth (RW)", command=self.test_auth).pack(side="left", padx=8)
         ttk.Button(btn_frame, text="🧪 Test Bearer (RO)", command=self.test_bearer_auth).pack(side="left", padx=8)
+
+        btn2 = ttk.Frame(parent)
+        btn2.pack(pady=4)
+        ttk.Button(btn2, text="📋 Copy redacted support text", command=self._copy_redacted_support).pack(side="left", padx=4)
+        ttk.Button(
+            btn2,
+            text="⬆️ Load x_credentials.json into keychain",
+            command=self._migrate_file_to_keyring_click,
+        ).pack(side="left", padx=4)
 
         # Optional AI: ToS review only (Tab 4). Fetching posts always uses the X API (Tab 3).
         ai_frame = ttk.LabelFrame(parent, text=" AI – ToS review (optional) ", padding=15)
@@ -405,6 +427,13 @@ Tab overview:
         self.advanced_btn_text = tk.StringVar(value="Advanced ▾")
         ttk.Button(ctrl_frame, textvariable=self.advanced_btn_text, command=self.toggle_advanced_controls).pack(side="left", padx=8)
         ttk.Button(ctrl_frame, text="💾 Save List", command=self.save_tweets).pack(side="right", padx=5)
+
+        ttk.Label(
+            parent,
+            textvariable=self.api_fetch_status_var,
+            style="Muted.TLabel",
+            wraplength=900,
+        ).pack(anchor="w", padx=4, pady=(0, 4))
 
         self.advanced_ctrl_frame = ttk.Frame(parent)
         self.advanced_visible = True
@@ -665,14 +694,8 @@ Tab overview:
         self._ai_scrub_running = False
 
     def _read_saved_tweets(self):
-        if not os.path.exists(TWEETS_FILE):
-            return []
-        try:
-            with open(TWEETS_FILE, encoding="utf-8") as f:
-                data = json.load(f)
-            return data if isinstance(data, list) else []
-        except (json.JSONDecodeError, OSError):
-            return []
+        data = read_json_file(TWEETS_FILE)
+        return data if isinstance(data, list) else []
 
     def _merge_tweet_sets(self, in_memory, from_cache):
         by_id = {}
@@ -870,18 +893,13 @@ Tab overview:
                 "summary": summary_text,
                 "total_rows": int(total_rows),
             }
-            with open(TOS_LAST_RUN_FILE, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2, ensure_ascii=False)
+            atomic_write_json(TOS_LAST_RUN_FILE, payload, keep_backups=2, indent=2)
         except OSError:
             pass
 
     def _load_tos_last_run(self):
-        if not os.path.exists(TOS_LAST_RUN_FILE):
-            return
-        try:
-            with open(TOS_LAST_RUN_FILE, encoding="utf-8") as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, OSError, TypeError):
+        data = read_json_file(TOS_LAST_RUN_FILE)
+        if not isinstance(data, dict):
             return
         raw_ids = data.get("ids") or data.get("flagged_ids")
         if not isinstance(raw_ids, list):
@@ -1039,6 +1057,7 @@ Tab overview:
 
     def _fetch_timeline_batch(self, api_client, user_id, since_id=None, until_id=None, use_user_auth=False):
         all_new = []
+        last_response = None
         pagination_token = None
         while True:
             params = {
@@ -1055,6 +1074,7 @@ Tab overview:
                 params["user_auth"] = True
 
             response = api_client.get_users_tweets(**params)
+            last_response = response
             if not response.data:
                 break
             for t in response.data:
@@ -1082,7 +1102,7 @@ Tab overview:
                 break
             pagination_token = meta["next_token"]
             time.sleep(1.1)
-        return all_new
+        return all_new, last_response
 
     def _sanitize_for_display(self, text):
         """Redact potential tokens/secrets from error text before showing to user."""
@@ -1244,18 +1264,14 @@ Tab overview:
 
     # ====================== PERSISTENCE ======================
     def load_tweets(self):
-        if os.path.exists(TWEETS_FILE):
-            try:
-                with open(TWEETS_FILE, encoding="utf-8") as f:
-                    self.tweets = json.load(f)
-            except (json.JSONDecodeError, OSError):
-                self.tweets = []
+        data = read_json_file(TWEETS_FILE)
+        self.tweets = data if isinstance(data, list) else []
 
     def save_tweets(self):
-        tmp = TWEETS_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self.tweets, f, indent=2)
-        os.replace(tmp, TWEETS_FILE)
+        try:
+            atomic_write_json(TWEETS_FILE, self.tweets, keep_backups=3, indent=2)
+        except OSError as e:
+            messagebox.showerror("Save failed (my_tweets.json)", str(e))
 
     def _load_archive_payload(self, path):
         with open(path, encoding="utf-8") as f:
@@ -1391,18 +1407,14 @@ Tab overview:
             messagebox.showerror("Import Failed", f"Could not import archive file.\n\n{self._sanitize_for_display(str(e))}")
 
     def load_history(self):
-        if os.path.exists(HISTORY_FILE):
-            try:
-                with open(HISTORY_FILE, encoding="utf-8") as f:
-                    self.deleted_history = json.load(f)
-            except (json.JSONDecodeError, OSError):
-                self.deleted_history = []
+        data = read_json_file(HISTORY_FILE)
+        self.deleted_history = data if isinstance(data, list) else []
 
     def save_history(self):
-        tmp = HISTORY_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self.deleted_history, f, indent=2)
-        os.replace(tmp, HISTORY_FILE)
+        try:
+            atomic_write_json(HISTORY_FILE, self.deleted_history, keep_backups=3, indent=2)
+        except OSError as e:
+            messagebox.showerror("Save failed (deleted_history.json)", str(e))
 
     def on_close(self):
         self.save_tweets()
@@ -1446,8 +1458,9 @@ Tab overview:
             primary_client = self.read_client
             primary_user_auth = primary_client is self.user_client
             all_new = []
+            last_response = None
             try:
-                all_new = self._fetch_timeline_batch(
+                all_new, last_response = self._fetch_timeline_batch(
                     api_client=primary_client,
                     user_id=user_id,
                     since_id=since_id,
@@ -1459,7 +1472,7 @@ Tab overview:
                 alternate_client = self.user_client if primary_client is self.bearer_client else self.bearer_client
                 if primary_status == 401 and alternate_client:
                     alternate_user_auth = alternate_client is self.user_client
-                    all_new = self._fetch_timeline_batch(
+                    all_new, last_response = self._fetch_timeline_batch(
                         api_client=alternate_client,
                         user_id=user_id,
                         since_id=since_id,
@@ -1470,6 +1483,10 @@ Tab overview:
                     self.status_var.set(f"{direction.title()} fetch fallback succeeded via {mode_name}.")
                 else:
                     raise primary_error
+            if last_response is not None:
+                cap = tweepy_extra.rate_limit_caption_from_response(last_response)
+                if cap:
+                    self.api_fetch_status_var.set(cap)
 
             existing = {t["id"] for t in self.tweets}
             added_ids = []
@@ -1487,6 +1504,9 @@ Tab overview:
             return added_ids
         except Exception as e:
             details = self._build_error_details(e)
+            rline = tweepy_extra.rate_caption_from_exception(e)
+            if rline:
+                details = details + "\n" + rline
             if self._status_code_from_error(e) == 401:
                 details += (
                     "\n\nActionable checks:\n"
@@ -1495,6 +1515,8 @@ Tab overview:
                     "• If bearer token starts with 'Bearer ', paste just the token string."
                 )
             messagebox.showerror("Fetch Error", details)
+            if rline:
+                self.api_fetch_status_var.set(rline[:200])
             return None
         finally:
             self.status_var.set("Ready")
@@ -3063,6 +3085,57 @@ Tab overview:
         ax.set_yticklabels([str(l) for l in labels], fontsize=6)
         ax.set_title(title)
         self._embed_fig(fig, self._analytics_chart_parent)
+
+    def _setup_menubar(self):
+        men = tk.Menu(self.root)
+        self.root.config(menu=men)
+        help_m = tk.Menu(men, tearoff=0)
+        men.add_cascade(label="Help", menu=help_m)
+        help_m.add_command(label="About this app", command=self._show_about)
+
+    def _show_about(self):
+        lines = [
+            f"PleaseDaddyElonNotTheBelt  v{getattr(pde, '__version__', '?')}",
+            f"Data directory: {REPO_ROOT}",
+            "",
+            credutil.support_bundle_text(),
+        ]
+        messagebox.showinfo("About", "\n".join(lines))
+
+    def _credential_form_dict(self) -> dict:
+        bt = self._normalize_bearer_token(self.cred_vars[4].get())
+        return {
+            "consumer_key": self.cred_vars[0].get().strip(),
+            "consumer_secret": self.cred_vars[1].get().strip(),
+            "access_token": self.cred_vars[2].get().strip(),
+            "access_token_secret": self.cred_vars[3].get().strip(),
+            "bearer_token": bt,
+            "ai_endpoint": (self.ai_endpoint_var.get() or "").strip() or AI_ENDPOINT_DEFAULT,
+            "ai_model": (self.ai_model_var.get() or "").strip() or (AI_MODELS[0] if AI_MODELS else ""),
+            "ai_token": (self.ai_token_var.get() or "").strip(),
+            "x_username": (self.x_username_var.get() or "").strip(),
+        }
+
+    def _copy_redacted_support(self):
+        block = credutil.redact_credentials_json_pretty(self._credential_form_dict())
+        block += "— environment —\n" + credutil.support_bundle_text()
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(block)
+        except tk.TclError:
+            messagebox.showerror("Clipboard", "Could not copy to the clipboard on this system.")
+            return
+        messagebox.showinfo("Copied", "Redacted key summary and environment (no real secrets) copied. For local bug notes only.")
+
+    def _migrate_file_to_keyring_click(self):
+        ok, msg = secure_creds.migrate_file_to_keyring(CREDENTIALS_FILE)
+        if ok:
+            self.cred_keyring_var.set(True)
+            self.load_credentials()
+        if ok:
+            messagebox.showinfo("Keychain", msg)
+        else:
+            messagebox.showerror("Keychain", msg)
 
 
 def main() -> None:

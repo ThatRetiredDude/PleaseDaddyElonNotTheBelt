@@ -1,4 +1,4 @@
-# Unit + integration (Tk + Xvfb) tests; ruff + mypy. No API keys.
+# Unit + integration (Tk + Xvfb) tests; ruff + mypy. No API keys. Parallel lint + test jobs.
 name: CI
 
 on:
@@ -8,17 +8,42 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - name: Install dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Ruff
+        run: ruff check pde PleaseDaddyElonNotTheBelt.py xeraser_analytics.py tests
+      - name: Ruff format
+        run: ruff format --check pde PleaseDaddyElonNotTheBelt.py xeraser_analytics.py tests
+      - name: Mypy
+        run: |
+          mypy pde/paths.py pde/ai_batching.py pde/atomicio.py pde/credutil.py pde/secure_creds.py pde/tweepy_extra.py pde/deps.py pde/__init__.py pde/__main__.py xeraser_analytics.py PleaseDaddyElonNotTheBelt.py
+
   test:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.12", "3.13"]
-
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
@@ -27,28 +52,15 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             requirements-dev.txt
-
       - name: Install system packages (Tk, Xvfb for GUI integration test)
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             python3-tk \
             xvfb
-
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt -r requirements-dev.txt
-
-      - name: Ruff
-        run: ruff check pde PleaseDaddyElonNotTheBelt.py xeraser_analytics.py tests
-
-      - name: Ruff format
-        run: ruff format --check pde PleaseDaddyElonNotTheBelt.py xeraser_analytics.py tests
-
-      - name: Mypy
-        run: |
-          mypy pde/paths.py pde/ai_batching.py pde/secure_creds.py pde/deps.py pde/__init__.py pde/__main__.py xeraser_analytics.py PleaseDaddyElonNotTheBelt.py
-
       - name: Run tests (Xvfb for headless Tk)
         run: xvfb-run -a --server-args="-screen 0 1280x1024x24" python -m pytest tests/ -q

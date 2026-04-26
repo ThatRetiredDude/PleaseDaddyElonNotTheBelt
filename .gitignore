@@ -6,7 +6,13 @@ credentials.json
 .env.local
 .env.*.local
 my_tweets.json
+my_tweets.json.bak
+my_tweets.json.bak.*
 deleted_history.json
+deleted_history.json.bak
+deleted_history.json.bak.*
+tos_last_run.json.bak
+tos_last_run.json.bak.*
 *.tmp
 *.tmp.json
 ai_requests.log
